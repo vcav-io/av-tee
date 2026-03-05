@@ -1,0 +1,7 @@
+[package]
+name = "tee-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tee-core = { path = "../tee-core" }
