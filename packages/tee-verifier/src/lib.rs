@@ -7,5 +7,8 @@ pub mod verify;
 
 pub use allowlist::{MeasurementEntry, StaticAllowlist, TransparencySource};
 pub use identity::RelayIdentity;
-pub use result::{AttestationStatus, TeeVerificationResult};
+pub use result::{
+    AttestationHashStatus, AttestationStatus, SignatureStatus, TeeVerificationResult,
+    TranscriptBinding,
+};
 pub use verify::{VerifyError, verify_tee_receipt};

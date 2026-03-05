@@ -15,7 +15,7 @@ SENSITIVE_MODULES=(
     "$RELAY_SRC/error.rs"
 )
 
-PATTERNS='tracing::(info|warn|error|debug|trace)!|log::(info|warn|error|debug|trace)!|\.context\s*\(|anyhow!\s*\('
+PATTERNS='(tracing::)?(info|warn|error|debug|trace)!|log::(info|warn|error|debug|trace)!|\.context\s*\(|anyhow!\s*\('
 GLOBAL_BAN='dbg!|println!|eprintln!'
 
 EXIT_CODE=0

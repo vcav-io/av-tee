@@ -27,7 +27,23 @@ pub async fn load_or_generate_signing_key(
         if let Some(parent) = sealed_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(sealed_path, sealed)?;
+        // Write with 0600 permissions (owner-only) and O_CREAT|O_EXCL to
+        // prevent TOCTOU race with concurrent relay starts.
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(sealed_path)?;
+            f.write_all(&sealed)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(sealed_path, &sealed)?;
+        }
         Ok(signing_key)
     }
 }

@@ -6,6 +6,7 @@ use axum::routing::{get, post};
 use tracing::warn;
 
 use tee_core::SimulatedCvm;
+use tee_core::attestation::CvmRuntime;
 use tee_relay::handlers::{self, RelayState};
 use tee_relay::relay::AppState;
 use tee_relay::session::{SessionStore, start_session_reaper};
@@ -34,24 +35,39 @@ async fn main() {
     // CVM no longer depends on signing key — construct it once
     let cvm = Arc::new(SimulatedCvm::new());
 
-    // Resolve signing key: env var override (dev) or seal/unseal lifecycle
-    let signing_key = match std::env::var("AV_SIGNING_KEY_HEX") {
-        Ok(hex_str) if hex_str != "0".repeat(64) => {
-            warn!("Using AV_SIGNING_KEY_HEX override (dev only)"); // SAFETY: no plaintext
-            let decoded = hex::decode(&hex_str).expect("AV_SIGNING_KEY_HEX is not valid hex");
-            let seed: [u8; 32] = decoded
-                .try_into()
-                .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)");
-            ed25519_dalek::SigningKey::from_bytes(&seed)
+    // Resolve signing key: env var override (dev only, blocked in real TEE) or seal/unseal lifecycle
+    let signing_key = if cvm.is_real_tee() {
+        if std::env::var("AV_SIGNING_KEY_HEX").is_ok() {
+            panic!(
+                "AV_SIGNING_KEY_HEX must not be set in real TEE mode — use seal/unseal lifecycle"
+            );
         }
-        _ => {
-            let data_dir =
-                std::env::var("AV_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/av-tee".to_string()); // SAFETY: no plaintext
-            let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
-            tracing::info!("Using seal/unseal key lifecycle"); // SAFETY: no plaintext
-            tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
-                .await
-                .expect("failed to load/generate sealed signing key")
+        let data_dir =
+            std::env::var("AV_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/av-tee".to_string()); // SAFETY: no plaintext
+        let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
+        tracing::info!("Using seal/unseal key lifecycle (real TEE)"); // SAFETY: no plaintext
+        tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
+            .await
+            .expect("failed to load/generate sealed signing key")
+    } else {
+        match std::env::var("AV_SIGNING_KEY_HEX") {
+            Ok(hex_str) if hex_str != "0".repeat(64) => {
+                warn!("Using AV_SIGNING_KEY_HEX override (dev only)"); // SAFETY: no plaintext
+                let decoded = hex::decode(&hex_str).expect("AV_SIGNING_KEY_HEX is not valid hex");
+                let seed: [u8; 32] = decoded
+                    .try_into()
+                    .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)");
+                ed25519_dalek::SigningKey::from_bytes(&seed)
+            }
+            _ => {
+                let data_dir =
+                    std::env::var("AV_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/av-tee".to_string()); // SAFETY: no plaintext
+                let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
+                tracing::info!("Using seal/unseal key lifecycle"); // SAFETY: no plaintext
+                tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
+                    .await
+                    .expect("failed to load/generate sealed signing key")
+            }
         }
     };
     let signing_pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());
