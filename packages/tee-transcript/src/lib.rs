@@ -142,7 +142,7 @@ mod tests {
     #[ignore] // Run manually: cargo test -p tee-transcript golden_bootstrap -- --ignored --nocapture
     fn golden_bootstrap() {
         let hash = compute_transcript_hash(&sample_inputs());
-        println!("GOLDEN_HASH={}", hex::encode(hash));
+        println!("GOLDEN_HASH={}", hex::encode(hash)); // SAFETY: no plaintext
     }
 
     #[test]
