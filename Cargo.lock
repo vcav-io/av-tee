@@ -1435,7 +1435,7 @@ dependencies = [
 [[package]]
 name = "receipt-core"
 version = "0.1.0"
-source = "git+https://github.com/vcav-io/vault-family-core.git?rev=ecd5db4#ecd5db48e46857951ac42fe8f49bb53dd8e6c7d7"
+source = "git+https://github.com/vcav-io/vault-family-core.git?rev=8316a50#8316a50d77aae45d846cd77a342a60ca5b0b1ef9"
 dependencies = [
  "base64",
  "chrono",
@@ -2341,7 +2341,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 [[package]]
 name = "vault-family-types"
 version = "0.1.0"
-source = "git+https://github.com/vcav-io/vault-family-core.git?rev=ecd5db4#ecd5db48e46857951ac42fe8f49bb53dd8e6c7d7"
+source = "git+https://github.com/vcav-io/vault-family-core.git?rev=8316a50#8316a50d77aae45d846cd77a342a60ca5b0b1ef9"
 dependencies = [
  "chrono",
  "serde",
