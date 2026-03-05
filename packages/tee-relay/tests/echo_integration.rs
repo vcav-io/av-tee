@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -9,7 +10,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use tee_core::SimulatedCvm;
 use tee_core::crypto::{build_aad, encrypt_payload};
 use tee_core::types::ParticipantRole;
-use tee_relay::echo::{self, EchoState};
+use tee_relay::echo::{self, EchoCreateSessionResponse, EchoState};
 use tee_relay::session::SessionStore;
 use tee_relay::types::*;
 
@@ -17,7 +18,7 @@ fn test_app() -> Router {
     let cvm = Arc::new(SimulatedCvm::new("aa".repeat(32)));
     let state = Arc::new(EchoState {
         cvm,
-        sessions: SessionStore::new(),
+        sessions: SessionStore::new(Duration::from_secs(600)),
     });
     Router::new()
         .route("/tee/info", get(echo::tee_info))
@@ -45,14 +46,13 @@ fn submit_encrypted_input(
     let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
     let tee_pub = PublicKey::from(*tee_pubkey_bytes);
 
-    // Parse session_id as UUID to get raw bytes
     let session_uuid = uuid::Uuid::parse_str(session_id).unwrap();
     let session_id_bytes: [u8; 16] = *session_uuid.as_bytes();
 
     // Echo mode uses dummy contract hash
     let contract_hash_bytes = vec![0u8; 32];
     let aad = build_aad(&session_id_bytes, &contract_hash_bytes, role);
-    let nonce = [0u8; 12]; // deterministic for test
+    let nonce = [0u8; 12];
 
     let (ciphertext, client_pub_bytes) = encrypt_payload(
         &client_secret,
@@ -94,7 +94,7 @@ async fn full_echo_roundtrip() {
     assert!(!info.measurement.is_empty());
 
     // 2. POST /sessions
-    let session: CreateSessionResponse = client
+    let session: EchoCreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .send()
         .await
@@ -124,7 +124,7 @@ async fn full_echo_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202); // waiting for other input
+    assert_eq!(resp.status(), 202);
 
     // 4. Submit responder input (encrypted)
     let resp_plaintext = b"responder secret data";
@@ -156,7 +156,7 @@ async fn full_echo_roundtrip() {
     assert_eq!(echo.tee_attestation.measurement, info.measurement);
     assert!(!echo.tee_attestation.attestation_hash.is_empty());
     assert!(!echo.tee_attestation.transcript_hash_hex.is_empty());
-    assert_eq!(echo.tee_attestation.transcript_hash_hex.len(), 128); // 64 bytes = 128 hex chars
+    assert_eq!(echo.tee_attestation.transcript_hash_hex.len(), 128);
 }
 
 #[tokio::test]
@@ -164,7 +164,7 @@ async fn duplicate_submission_returns_422() {
     let base = start_server().await;
     let client = reqwest::Client::new();
 
-    let session: CreateSessionResponse = client
+    let session: EchoCreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .send()
         .await
@@ -186,7 +186,6 @@ async fn duplicate_submission_returns_422() {
         b"first",
     );
 
-    // First submission
     let resp = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
         .json(&req)
@@ -195,7 +194,6 @@ async fn duplicate_submission_returns_422() {
         .unwrap();
     assert_eq!(resp.status(), 202);
 
-    // Duplicate submission — same role, same session
     let req2 = submit_encrypted_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -216,7 +214,7 @@ async fn each_session_gets_unique_keypair() {
     let base = start_server().await;
     let client = reqwest::Client::new();
 
-    let s1: CreateSessionResponse = client
+    let s1: EchoCreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .send()
         .await
@@ -224,7 +222,7 @@ async fn each_session_gets_unique_keypair() {
         .json()
         .await
         .unwrap();
-    let s2: CreateSessionResponse = client
+    let s2: EchoCreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .send()
         .await
