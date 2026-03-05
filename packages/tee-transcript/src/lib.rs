@@ -139,6 +139,23 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Run manually: cargo test -p tee-transcript golden_bootstrap -- --ignored --nocapture
+    fn golden_bootstrap() {
+        let hash = compute_transcript_hash(&sample_inputs());
+        println!("GOLDEN_HASH={}", hex::encode(hash));
+    }
+
+    #[test]
+    fn golden_fixture_parity() {
+        let hash = compute_transcript_hash(&sample_inputs());
+        assert_eq!(
+            hex::encode(hash),
+            "b0fceb1f1dfd40fab87a529883810443dabde5416f0d06fbc57026a8bff0989c233781c7beeca30d85154ea3896eba00e21d99a8aac2dbd05ae85bb1e806a256",
+            "golden fixture changed — update TS verifier if this changes"
+        );
+    }
+
+    #[test]
     fn hash_is_64_bytes() {
         let h = compute_transcript_hash(&sample_inputs());
         assert_eq!(h.len(), 64);
