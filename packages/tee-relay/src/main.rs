@@ -34,18 +34,24 @@ async fn main() {
     // CVM no longer depends on signing key — construct it once
     let cvm = Arc::new(SimulatedCvm::new());
 
-    // Derive signing key from env var (dev convenience) or generate a zero key
-    let signing_key = {
-        let hex_str = std::env::var("AV_SIGNING_KEY_HEX").unwrap_or_else(|_| "0".repeat(64));
-        if hex_str == "0".repeat(64) {
-            warn!("AV_SIGNING_KEY_HEX not set, using zero key (dev only)"); // SAFETY: no plaintext
-            ed25519_dalek::SigningKey::from_bytes(&[0u8; 32])
-        } else {
+    // Resolve signing key: env var override (dev) or seal/unseal lifecycle
+    let signing_key = match std::env::var("AV_SIGNING_KEY_HEX") {
+        Ok(hex_str) if hex_str != "0".repeat(64) => {
+            warn!("Using AV_SIGNING_KEY_HEX override (dev only)"); // SAFETY: no plaintext
             let decoded = hex::decode(&hex_str).expect("AV_SIGNING_KEY_HEX is not valid hex");
             let seed: [u8; 32] = decoded
                 .try_into()
                 .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)");
             ed25519_dalek::SigningKey::from_bytes(&seed)
+        }
+        _ => {
+            let data_dir =
+                std::env::var("AV_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/av-tee".to_string()); // SAFETY: no plaintext
+            let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
+            tracing::info!("Using seal/unseal key lifecycle"); // SAFETY: no plaintext
+            tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
+                .await
+                .expect("failed to load/generate sealed signing key")
         }
     };
     let signing_pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());

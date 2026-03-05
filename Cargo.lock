@@ -1920,6 +1920,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tee-core",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
