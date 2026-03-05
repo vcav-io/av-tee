@@ -4,15 +4,36 @@ use std::time::Duration;
 use axum::Router;
 use axum::routing::{get, post};
 use base64::Engine;
+use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use tee_core::SimulatedCvm;
 use tee_core::crypto::{build_aad, encrypt_payload};
+use tee_core::transcript::{TranscriptInputs, compute_transcript_hash};
 use tee_core::types::ParticipantRole;
 use tee_relay::handlers::{self, RelayState};
 use tee_relay::relay::AppState;
 use tee_relay::session::SessionStore;
 use tee_relay::types::*;
+
+/// Start a mock Anthropic API server that returns an HTTP error.
+async fn start_failing_mock_provider(status_code: u16) -> String {
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move || async move {
+            (
+                axum::http::StatusCode::from_u16(status_code).unwrap(),
+                axum::Json(serde_json::json!({"error": "mock error"})),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
 
 /// Start a mock Anthropic API server that returns a fixed JSON response.
 async fn start_mock_provider(output_json: &str) -> String {
@@ -401,4 +422,464 @@ async fn relay_contract_hash_bound_into_session() {
     // contract_hash should be a 64-char hex string
     assert_eq!(session.contract_hash.len(), 64);
     assert!(session.contract_hash.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+/// Helper: encrypt input and return both the SubmitInputRequest and the ciphertext hash.
+fn encrypt_input_with_hash(
+    tee_pubkey_bytes: &[u8; 32],
+    session_id: &str,
+    contract_hash_hex: &str,
+    role: ParticipantRole,
+    plaintext: &[u8],
+) -> (SubmitInputRequest, String) {
+    let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
+    let tee_pub = PublicKey::from(*tee_pubkey_bytes);
+    let session_uuid = uuid::Uuid::parse_str(session_id).unwrap();
+    let session_id_bytes: [u8; 16] = *session_uuid.as_bytes();
+    let contract_hash_bytes = hex::decode(contract_hash_hex).unwrap();
+    let aad = build_aad(&session_id_bytes, &contract_hash_bytes, role);
+    let nonce = [0u8; 12];
+
+    let (ciphertext, client_pub_bytes) = encrypt_payload(
+        &client_secret,
+        &tee_pub,
+        plaintext,
+        &session_id_bytes,
+        &aad,
+        &nonce,
+    )
+    .unwrap();
+
+    let ct_hash = hex::encode(Sha256::digest(&ciphertext));
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let req = SubmitInputRequest {
+        role: match role {
+            ParticipantRole::Initiator => "initiator".to_string(),
+            ParticipantRole::Responder => "responder".to_string(),
+        },
+        client_ephemeral_pubkey: b64.encode(client_pub_bytes),
+        nonce: b64.encode(nonce),
+        ciphertext: b64.encode(&ciphertext),
+    };
+    (req, ct_hash)
+}
+
+/// Helper: poll until session completes, return the output response.
+async fn poll_until_done(
+    client: &reqwest::Client,
+    base: &str,
+    session_id: &str,
+) -> SessionOutputResponse {
+    let mut attempts = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let status: SessionStatusResponse = client
+            .get(format!("{base}/sessions/{session_id}/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        if status.state == tee_relay::session::SessionState::Completed
+            || status.state == tee_relay::session::SessionState::Aborted
+        {
+            break;
+        }
+        attempts += 1;
+        assert!(attempts < 50, "timed out waiting for session to finish");
+    }
+
+    client
+        .get(format!("{base}/sessions/{session_id}/output"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn relay_transcript_hash_matches_recomputed() {
+    let mock_output = r#"{"decision":"PROCEED"}"#;
+    let mock_url = start_mock_provider(mock_output).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let info: TeeInfoResponse = client
+        .get(format!("{base}/tee/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let session: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tee_pubkey_bytes: [u8; 32] = b64
+        .decode(&session.tee_session_pubkey)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let init_input = serde_json::json!({"role": "alice", "context": {"x": 1}});
+    let (init_req, init_ct_hash) = encrypt_input_with_hash(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Initiator,
+        serde_json::to_vec(&init_input).unwrap().as_slice(),
+    );
+    client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&init_req)
+        .send()
+        .await
+        .unwrap();
+
+    let resp_input = serde_json::json!({"role": "bob", "context": {"x": 2}});
+    let (resp_req, resp_ct_hash) = encrypt_input_with_hash(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Responder,
+        serde_json::to_vec(&resp_input).unwrap().as_slice(),
+    );
+    client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&resp_req)
+        .send()
+        .await
+        .unwrap();
+
+    let output = poll_until_done(&client, &base, &session.session_id).await;
+    assert_eq!(output.state, tee_relay::session::SessionState::Completed);
+
+    let receipt = output.receipt_v2.expect("receipt_v2");
+    let tee_att = receipt.tee_attestation.as_ref().expect("tee_attestation");
+    let receipt_transcript_hex = tee_att
+        .transcript_hash_hex
+        .as_ref()
+        .expect("transcript_hash_hex");
+
+    // Recompute transcript hash from receipt fields
+    let output_hash = &receipt.commitments.output_hash;
+    let prompt_template_hash = receipt
+        .commitments
+        .prompt_template_hash
+        .as_ref()
+        .expect("prompt_template_hash");
+
+    let recomputed = compute_transcript_hash(&TranscriptInputs {
+        contract_hash: &receipt.commitments.contract_hash,
+        prompt_template_hash,
+        initiator_submission_hash: &init_ct_hash,
+        responder_submission_hash: &resp_ct_hash,
+        output_hash,
+        receipt_signing_pubkey_hex: &info.receipt_signing_pubkey_hex,
+    });
+
+    assert_eq!(receipt_transcript_hex, &hex::encode(recomputed));
+}
+
+#[tokio::test]
+async fn relay_forward_secrecy_unique_session_keys() {
+    let mock_url = start_mock_provider("{}").await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let s1: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let s2: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Each session must have a unique ECDH pubkey
+    assert_ne!(s1.tee_session_pubkey, s2.tee_session_pubkey);
+    // And unique session IDs
+    assert_ne!(s1.session_id, s2.session_id);
+}
+
+#[tokio::test]
+async fn relay_failure_receipt_on_provider_error() {
+    let mock_url = start_failing_mock_provider(500).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let session: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tee_pubkey_bytes: [u8; 32] = b64
+        .decode(&session.tee_session_pubkey)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let init_input = serde_json::json!({"role": "alice", "context": {}});
+    let init_req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Initiator,
+        serde_json::to_vec(&init_input).unwrap().as_slice(),
+    );
+    client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&init_req)
+        .send()
+        .await
+        .unwrap();
+
+    let resp_input = serde_json::json!({"role": "bob", "context": {}});
+    let resp_req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Responder,
+        serde_json::to_vec(&resp_input).unwrap().as_slice(),
+    );
+    client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&resp_req)
+        .send()
+        .await
+        .unwrap();
+
+    let output = poll_until_done(&client, &base, &session.session_id).await;
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    assert!(output.output.is_none());
+
+    // Failure receipt should be present
+    let receipt = output
+        .receipt_v2
+        .expect("failure receipt_v2 should be present");
+    assert_eq!(
+        receipt.claims.status,
+        Some(receipt_core::SessionStatus::Error)
+    );
+    assert_eq!(
+        receipt.claims.execution_lane,
+        Some(receipt_core::ExecutionLaneV2::Tee)
+    );
+    // TEE attestation should still be populated on failure receipts
+    assert!(receipt.tee_attestation.is_some());
+}
+
+#[tokio::test]
+async fn relay_aad_mismatch_rejected() {
+    let mock_url = start_mock_provider("{}").await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let session: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tee_pubkey_bytes: [u8; 32] = b64
+        .decode(&session.tee_session_pubkey)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    // Encrypt with WRONG contract hash — AAD mismatch
+    let wrong_contract_hash = "ff".repeat(32);
+    let input = serde_json::json!({"role": "alice", "context": {}});
+    let req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &wrong_contract_hash,
+        ParticipantRole::Initiator,
+        serde_json::to_vec(&input).unwrap().as_slice(),
+    );
+
+    let resp = client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    // Should be rejected with constant-shape 422
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn relay_role_swap_rejected() {
+    let mock_url = start_mock_provider("{}").await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let session: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tee_pubkey_bytes: [u8; 32] = b64
+        .decode(&session.tee_session_pubkey)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    // Encrypt as initiator but submit as responder — AAD won't match
+    let input = serde_json::json!({"role": "alice", "context": {}});
+    let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
+    let tee_pub = PublicKey::from(tee_pubkey_bytes);
+    let session_uuid = uuid::Uuid::parse_str(&session.session_id).unwrap();
+    let session_id_bytes: [u8; 16] = *session_uuid.as_bytes();
+    let contract_hash_bytes = hex::decode(&session.contract_hash).unwrap();
+
+    // Build AAD for initiator role
+    let initiator_aad = build_aad(
+        &session_id_bytes,
+        &contract_hash_bytes,
+        ParticipantRole::Initiator,
+    );
+    let nonce = [0u8; 12];
+    let (ciphertext, client_pub_bytes) = encrypt_payload(
+        &client_secret,
+        &tee_pub,
+        serde_json::to_vec(&input).unwrap().as_slice(),
+        &session_id_bytes,
+        &initiator_aad,
+        &nonce,
+    )
+    .unwrap();
+
+    // Submit with responder role — AAD mismatch should cause decryption failure
+    let req = SubmitInputRequest {
+        role: "responder".to_string(),
+        client_ephemeral_pubkey: b64.encode(client_pub_bytes),
+        nonce: b64.encode(nonce),
+        ciphertext: b64.encode(&ciphertext),
+    };
+
+    let resp = client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn relay_receipt_session_id_matches() {
+    let mock_output = r#"{"decision":"HALT"}"#;
+    let mock_url = start_mock_provider(mock_output).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let session: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tee_pubkey_bytes: [u8; 32] = b64
+        .decode(&session.tee_session_pubkey)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let init_input = serde_json::json!({"role": "alice", "context": {}});
+    let init_req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Initiator,
+        serde_json::to_vec(&init_input).unwrap().as_slice(),
+    );
+    client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&init_req)
+        .send()
+        .await
+        .unwrap();
+
+    let resp_input = serde_json::json!({"role": "bob", "context": {}});
+    let resp_req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Responder,
+        serde_json::to_vec(&resp_input).unwrap().as_slice(),
+    );
+    client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&resp_req)
+        .send()
+        .await
+        .unwrap();
+
+    let output = poll_until_done(&client, &base, &session.session_id).await;
+    let receipt = output.receipt_v2.expect("receipt_v2");
+
+    // Receipt session_id must match the actual session
+    assert_eq!(receipt.session_id, session.session_id);
 }

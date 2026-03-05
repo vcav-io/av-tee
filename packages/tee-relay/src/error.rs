@@ -27,6 +27,19 @@ pub enum RelayError {
 }
 
 impl RelayError {
+    /// Return a safe variant name for logging (never includes the inner message).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            RelayError::ContractValidation(_) => "contract_validation",
+            RelayError::PromptAssembly(_) => "prompt_assembly",
+            RelayError::Provider(_) => "provider",
+            RelayError::OutputValidation(_) => "output_validation",
+            RelayError::ReceiptSigning(_) => "receipt_signing",
+            RelayError::Internal(_) => "internal",
+            RelayError::SessionNotFound => "session_not_found",
+        }
+    }
+
     fn status_code(&self) -> StatusCode {
         match self {
             RelayError::ContractValidation(_) | RelayError::PromptAssembly(_) => {

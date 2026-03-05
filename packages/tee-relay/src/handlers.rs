@@ -291,7 +291,8 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
             });
         }
         Err(e) => {
-            tracing::warn!(session_id = %session_id, "inference failed: {e}");
+            // Log only the error variant, not the full message (may contain plaintext fragments)
+            tracing::warn!(session_id = %session_id, error_kind = %e.kind(), "inference failed");
             // Build failure receipt
             let failure_receipt = relay::build_failure_receipt_v2(
                 &session_id,
@@ -306,7 +307,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
 
             state.sessions.with_session(&session_id, |session| {
                 session.state = SessionState::Aborted;
-                session.abort_signal = Some(e.to_string());
+                session.abort_signal = Some(e.kind().to_string());
                 session.receipt_v2 = match failure_receipt {
                     Ok(r) => Some(r),
                     Err(re) => {
