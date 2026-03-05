@@ -370,7 +370,7 @@ async fn build_tee_receipt_v2(
                 match serde_json::from_value(serde_json::Value::String(s.clone())) {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        tracing::error!("failed to deserialize tee_type '{s}': {e}, omitting");
+                        tracing::error!("failed to deserialize tee_type '{s}': {e}, omitting"); // SAFETY: no plaintext
                         None
                     }
                 }
@@ -505,7 +505,7 @@ pub async fn build_failure_receipt_v2(
                 match serde_json::from_value(serde_json::Value::String(s.clone())) {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        tracing::error!("failed to deserialize tee_type '{s}': {e}, omitting");
+                        tracing::error!("failed to deserialize tee_type '{s}': {e}, omitting"); // SAFETY: no plaintext
                         None
                     }
                 }

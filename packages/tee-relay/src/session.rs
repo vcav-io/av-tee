@@ -126,7 +126,7 @@ impl SessionStore {
         match self.sessions.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                tracing::error!("session store mutex was poisoned, recovering");
+                tracing::error!("session store mutex was poisoned, recovering"); // SAFETY: no plaintext
                 poisoned.into_inner()
             }
         }
@@ -174,7 +174,7 @@ pub fn start_session_reaper(store: std::sync::Arc<SessionStore>) -> tokio::task:
             interval.tick().await;
             let reaped = store.reap_expired();
             if reaped > 0 {
-                tracing::info!(reaped, "session reaper: expired sessions removed");
+                tracing::info!(reaped, "session reaper: expired sessions removed"); // SAFETY: no plaintext
             }
         }
     })

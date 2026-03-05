@@ -18,7 +18,7 @@ async fn main() {
             .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "unknown".to_string());
-        eprintln!("panic occurred at {location}");
+        eprintln!("panic occurred at {location}"); // SAFETY: no plaintext
     }));
 
     tracing_subscriber::fmt()

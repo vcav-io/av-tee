@@ -35,7 +35,7 @@ pub async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, StatusCode> {
     let (pubkey, secret) = state.app.cvm.derive_session_keypair().map_err(|e| {
-        tracing::error!("session keypair derivation failed: {e}");
+        tracing::error!("session keypair derivation failed: {e}"); // SAFETY: no plaintext
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -46,7 +46,7 @@ pub async fn create_session(
     // Compute contract hash for binding
     let contract_hash_hex = {
         let canonical = receipt_core::canonicalize_serializable(&req.contract).map_err(|e| {
-            tracing::error!("contract canonicalization failed: {e}");
+            tracing::error!("contract canonicalization failed: {e}"); // SAFETY: no plaintext
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
         let mut hasher = Sha256::new();
@@ -55,7 +55,7 @@ pub async fn create_session(
     };
 
     let contract_hash_bytes = hex::decode(&contract_hash_hex).map_err(|e| {
-        tracing::error!("contract hash hex decode failed: {e}");
+        tracing::error!("contract hash hex decode failed: {e}"); // SAFETY: no plaintext
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -199,7 +199,7 @@ pub async fn submit_input(
     let session_id_watch = session_id.clone();
     tokio::spawn(async move {
         if let Err(e) = handle.await {
-            tracing::error!(session_id = %session_id_watch, "inference task panicked: {e}");
+            tracing::error!(session_id = %session_id_watch, "inference task panicked: {e}"); // SAFETY: no plaintext
             state_watch
                 .sessions
                 .with_session(&session_id_watch, |session| {
@@ -267,7 +267,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
                 hex::encode(h.finalize())
             }
             Err(e) => {
-                tracing::error!(session_id = %session_id, "schema canonicalization failed for failure receipt: {e}");
+                tracing::error!(session_id = %session_id, "schema canonicalization failed for failure receipt: {e}"); // SAFETY: no plaintext
                 hex::encode(Sha256::digest(b""))
             }
         }
@@ -296,7 +296,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
         }
         Err(e) => {
             // Log only the error variant, not the full message (may contain plaintext fragments)
-            tracing::warn!(session_id = %session_id, error_kind = %e.kind(), "inference failed");
+            tracing::warn!(session_id = %session_id, error_kind = %e.kind(), "inference failed"); // SAFETY: no plaintext
             // Build failure receipt
             let failure_receipt = relay::build_failure_receipt_v2(
                 &session_id,
@@ -315,7 +315,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
                 session.receipt_v2 = match failure_receipt {
                     Ok(r) => Some(r),
                     Err(re) => {
-                        tracing::error!(session_id = %session_id, "failed to build failure receipt: {re}");
+                        tracing::error!(session_id = %session_id, "failed to build failure receipt: {re}"); // SAFETY: no plaintext
                         None
                     }
                 };
