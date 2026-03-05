@@ -1,3 +1,5 @@
 #![forbid(unsafe_code)]
 
-// TEE-hardened relay — implementation in Wave 2.
+pub mod echo;
+pub mod session;
+pub mod types;

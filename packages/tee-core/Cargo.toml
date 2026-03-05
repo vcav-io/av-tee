@@ -19,8 +19,7 @@ zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
 
 # VFC types (for TeeType re-export)
-# TODO: update to main rev once vcav-io/vault-family-core#29 merges
-receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "eaba838" }
+receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "cb53ded" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

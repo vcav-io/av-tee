@@ -3,5 +3,41 @@ name = "tee-relay"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "tee-relay"
+path = "src/main.rs"
+
 [dependencies]
 tee-core = { path = "../tee-core" }
+
+# VFC types
+receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "cb53ded" }
+
+# Web framework
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["derive"] }
+
+# Serialization
+base64 = "0.22"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Misc
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -157,10 +157,10 @@ mod tests {
 
     #[test]
     fn ecdh_roundtrip_encrypt_decrypt() {
-        let tee_secret = Zeroizing::new(StaticSecret::random_from_rng(&mut rand::thread_rng()));
+        let tee_secret = Zeroizing::new(StaticSecret::random_from_rng(rand::thread_rng()));
         let tee_pub = PublicKey::from(&*tee_secret);
 
-        let client_secret = StaticSecret::random_from_rng(&mut rand::thread_rng());
+        let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
 
         let session_id = test_session_id();
         let aad = build_aad(
@@ -197,9 +197,9 @@ mod tests {
 
     #[test]
     fn aad_mismatch_wrong_session_id() {
-        let tee_secret = Zeroizing::new(StaticSecret::random_from_rng(&mut rand::thread_rng()));
+        let tee_secret = Zeroizing::new(StaticSecret::random_from_rng(rand::thread_rng()));
         let tee_pub = PublicKey::from(&*tee_secret);
-        let client_secret = StaticSecret::random_from_rng(&mut rand::thread_rng());
+        let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
 
         let session_id = test_session_id();
         let aad = build_aad(
@@ -241,9 +241,9 @@ mod tests {
 
     #[test]
     fn aad_mismatch_wrong_contract_hash() {
-        let tee_secret = Zeroizing::new(StaticSecret::random_from_rng(&mut rand::thread_rng()));
+        let tee_secret = Zeroizing::new(StaticSecret::random_from_rng(rand::thread_rng()));
         let tee_pub = PublicKey::from(&*tee_secret);
-        let client_secret = StaticSecret::random_from_rng(&mut rand::thread_rng());
+        let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
 
         let session_id = test_session_id();
         let aad = build_aad(
@@ -280,9 +280,9 @@ mod tests {
 
     #[test]
     fn aad_mismatch_wrong_role() {
-        let tee_secret = Zeroizing::new(StaticSecret::random_from_rng(&mut rand::thread_rng()));
+        let tee_secret = Zeroizing::new(StaticSecret::random_from_rng(rand::thread_rng()));
         let tee_pub = PublicKey::from(&*tee_secret);
-        let client_secret = StaticSecret::random_from_rng(&mut rand::thread_rng());
+        let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
 
         let session_id = test_session_id();
         let initiator_aad = build_aad(
