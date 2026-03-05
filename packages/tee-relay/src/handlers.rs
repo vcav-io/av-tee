@@ -20,9 +20,13 @@ pub struct RelayState {
     pub sessions: std::sync::Arc<SessionStore>,
 }
 
-/// GET /tee/info — return enclave identity.
+/// GET /tee/info — return enclave identity + signing pubkey.
 pub async fn tee_info(State(state): State<Arc<RelayState>>) -> Json<TeeInfoResponse> {
-    Json(TeeInfoResponse::from(state.app.cvm.identity()))
+    let pubkey_hex = hex::encode(state.app.signing_key.verifying_key().as_bytes());
+    Json(TeeInfoResponse::from_identity_and_pubkey(
+        state.app.cvm.identity(),
+        &pubkey_hex,
+    ))
 }
 
 /// POST /sessions — create a new relay session with per-session ECDH keypair.

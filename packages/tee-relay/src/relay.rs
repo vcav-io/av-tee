@@ -254,8 +254,9 @@ async fn build_tee_receipt_v2(
     inference_start: chrono::DateTime<chrono::Utc>,
     inference_end: chrono::DateTime<chrono::Utc>,
 ) -> Result<ReceiptV2, RelayError> {
-    let identity = state.cvm.identity();
-    let receipt_signing_pubkey_hex = &identity.receipt_signing_pubkey_hex;
+    // Derive receipt signing pubkey from AppState (not from CVM identity)
+    let receipt_signing_pubkey_hex =
+        receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
 
     // Build transcript hash for attestation binding
     let transcript_inputs = TranscriptInputs {
@@ -264,7 +265,7 @@ async fn build_tee_receipt_v2(
         initiator_submission_hash,
         responder_submission_hash,
         output_hash,
-        receipt_signing_pubkey_hex,
+        receipt_signing_pubkey_hex: &receipt_signing_pubkey_hex,
     };
     let transcript_hash = compute_transcript_hash(&transcript_inputs);
     let transcript_hash_hex = hex::encode(transcript_hash);
@@ -283,9 +284,8 @@ async fn build_tee_receipt_v2(
     };
 
     // Compute operator key fingerprint
-    let verifying_key_hex = receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
     let operator_key_fingerprint = {
-        let key_bytes = hex::decode(&verifying_key_hex)
+        let key_bytes = hex::decode(&receipt_signing_pubkey_hex)
             .map_err(|e| RelayError::Internal(format!("own verifying key is invalid hex: {e}")))?;
         let mut hasher = Sha256::new();
         hasher.update(&key_bytes);
@@ -298,7 +298,7 @@ async fn build_tee_receipt_v2(
     {
         Ok(ms) => Some(ms),
         Err(_) => {
-            tracing::warn!("negative provider latency detected (clock skew?), omitting");
+            tracing::warn!("negative provider latency detected (clock skew?), omitting"); // SAFETY: no plaintext
             None
         }
     };
@@ -401,8 +401,9 @@ pub async fn build_failure_receipt_v2(
     signal_class: &str,
     state: &AppState,
 ) -> Result<ReceiptV2, RelayError> {
-    let identity = state.cvm.identity();
-    let receipt_signing_pubkey_hex = &identity.receipt_signing_pubkey_hex;
+    // Derive receipt signing pubkey from AppState (not from CVM identity)
+    let receipt_signing_pubkey_hex =
+        receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
 
     // For failure receipts, use empty-string hash for missing fields
     let empty_hash = hex::encode(Sha256::digest(b""));
@@ -413,7 +414,7 @@ pub async fn build_failure_receipt_v2(
         initiator_submission_hash: initiator_submission_hash.unwrap_or(&empty_hash),
         responder_submission_hash: responder_submission_hash.unwrap_or(&empty_hash),
         output_hash: &empty_hash,
-        receipt_signing_pubkey_hex,
+        receipt_signing_pubkey_hex: &receipt_signing_pubkey_hex,
     };
     let transcript_hash = compute_transcript_hash(&transcript_inputs);
     let transcript_hash_hex = hex::encode(transcript_hash);

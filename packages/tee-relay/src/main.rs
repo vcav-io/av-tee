@@ -31,25 +31,42 @@ async fn main() {
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
-    let signing_pubkey_hex = std::env::var("AV_SIGNING_KEY_HEX").unwrap_or_else(|_| "0".repeat(64));
-    let cvm = Arc::new(SimulatedCvm::new(signing_pubkey_hex.clone()));
+    // CVM no longer depends on signing key — construct it once
+    let cvm = Arc::new(SimulatedCvm::new());
+
+    // Derive signing key from env var (dev convenience) or generate a zero key
+    let signing_key = {
+        let hex_str = std::env::var("AV_SIGNING_KEY_HEX").unwrap_or_else(|_| "0".repeat(64));
+        if hex_str == "0".repeat(64) {
+            warn!("AV_SIGNING_KEY_HEX not set, using zero key (dev only)"); // SAFETY: no plaintext
+            ed25519_dalek::SigningKey::from_bytes(&[0u8; 32])
+        } else {
+            let decoded = hex::decode(&hex_str).expect("AV_SIGNING_KEY_HEX is not valid hex");
+            let seed: [u8; 32] = decoded
+                .try_into()
+                .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)");
+            ed25519_dalek::SigningKey::from_bytes(&seed)
+        }
+    };
+    let signing_pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());
 
     if echo_mode {
-        run_echo_mode(cvm).await;
+        run_echo_mode(cvm, &signing_pubkey_hex).await;
     } else {
-        run_relay_mode(cvm, signing_pubkey_hex).await;
+        run_relay_mode(cvm, signing_key).await;
     }
 }
 
-async fn run_echo_mode(cvm: Arc<SimulatedCvm>) {
+async fn run_echo_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: &str) {
     use tee_relay::echo::{self, EchoState};
 
-    warn!("ECHO MODE — NOT FOR PRODUCTION. Binds to 127.0.0.1 only.");
-    warn!("This relay uses SimulatedCvm with assurance_level: SelfAsserted.");
+    warn!("ECHO MODE — NOT FOR PRODUCTION. Binds to 127.0.0.1 only."); // SAFETY: no plaintext
+    warn!("This relay uses SimulatedCvm with assurance_level: SelfAsserted."); // SAFETY: no plaintext
 
     let state = Arc::new(EchoState {
         cvm,
         sessions: SessionStore::new(Duration::from_secs(600)),
+        receipt_signing_pubkey_hex: signing_pubkey_hex.to_string(),
     });
 
     let app = Router::new()
@@ -60,26 +77,13 @@ async fn run_echo_mode(cvm: Arc<SimulatedCvm>) {
 
     let bind = "127.0.0.1:3100";
     let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
-    tracing::info!("tee-relay echo listening on {bind}");
+    tracing::info!("tee-relay echo listening on {bind}"); // SAFETY: no plaintext
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: String) {
-    warn!("TEE RELAY MODE — SimulatedCvm (not production-secure).");
-    warn!("Phase 1: attestable receipts but no client-side verification tooling yet.");
-
-    // Derive signing key from the hex seed
-    let seed_bytes: [u8; 32] = if signing_pubkey_hex == "0".repeat(64) {
-        tracing::warn!("AV_SIGNING_KEY_HEX not set, using zero key (dev only)");
-        [0u8; 32]
-    } else {
-        let decoded =
-            hex::decode(&signing_pubkey_hex).expect("AV_SIGNING_KEY_HEX is not valid hex");
-        decoded
-            .try_into()
-            .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)")
-    };
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_key: ed25519_dalek::SigningKey) {
+    warn!("TEE RELAY MODE — SimulatedCvm (not production-secure)."); // SAFETY: no plaintext
+    warn!("Phase 1: attestable receipts but no client-side verification tooling yet."); // SAFETY: no plaintext
 
     let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
     let anthropic_model_id =
@@ -129,6 +133,6 @@ async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: String) {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
-    tracing::info!("tee-relay listening on {bind}");
+    tracing::info!("tee-relay listening on {bind}"); // SAFETY: no plaintext
     axum::serve(listener, app).await.unwrap();
 }

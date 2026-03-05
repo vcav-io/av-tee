@@ -19,6 +19,8 @@ use crate::types::*;
 pub struct EchoState {
     pub cvm: Arc<dyn CvmRuntime>,
     pub sessions: SessionStore,
+    /// Receipt signing pubkey hex — passed from main, not from CVM identity.
+    pub receipt_signing_pubkey_hex: String,
 }
 
 /// Echo-mode CreateSessionResponse (no contract_hash).
@@ -28,9 +30,12 @@ pub struct EchoCreateSessionResponse {
     pub tee_session_pubkey: String,
 }
 
-/// GET /tee/info — return enclave identity (no session key).
+/// GET /tee/info — return enclave identity + signing pubkey.
 pub async fn tee_info(State(state): State<Arc<EchoState>>) -> Json<TeeInfoResponse> {
-    Json(TeeInfoResponse::from(state.cvm.identity()))
+    Json(TeeInfoResponse::from_identity_and_pubkey(
+        state.cvm.identity(),
+        &state.receipt_signing_pubkey_hex,
+    ))
 }
 
 /// POST /sessions — create a new echo session with per-session ECDH keypair.
@@ -213,7 +218,6 @@ async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<Echo
         hex::encode(h.finalize())
     };
 
-    let identity = state.cvm.identity();
     let initiator_sub_hash = session.initiator_ciphertext_hash.as_ref().ok_or(())?;
     let responder_sub_hash = session.responder_ciphertext_hash.as_ref().ok_or(())?;
 
@@ -230,7 +234,7 @@ async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<Echo
         initiator_submission_hash: initiator_sub_hash,
         responder_submission_hash: responder_sub_hash,
         output_hash: &output_hash,
-        receipt_signing_pubkey_hex: &identity.receipt_signing_pubkey_hex,
+        receipt_signing_pubkey_hex: &state.receipt_signing_pubkey_hex,
     };
 
     let transcript_hash = compute_transcript_hash(&transcript_inputs);
@@ -259,7 +263,7 @@ async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<Echo
                 .unwrap_or_else(|| format!("{:?}", report.tee_type)),
             measurement: report.measurement,
             attestation_hash,
-            receipt_signing_pubkey_hex: identity.receipt_signing_pubkey_hex.clone(),
+            receipt_signing_pubkey_hex: state.receipt_signing_pubkey_hex.clone(),
             transcript_hash_hex,
         },
     })

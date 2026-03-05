@@ -92,7 +92,7 @@ fn test_contract() -> vault_family_types::Contract {
 }
 
 fn test_relay_state(mock_url: &str) -> Arc<RelayState> {
-    let cvm = Arc::new(SimulatedCvm::new("bb".repeat(32)));
+    let cvm = Arc::new(SimulatedCvm::new());
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0xBBu8; 32]);
 
     Arc::new(RelayState {
