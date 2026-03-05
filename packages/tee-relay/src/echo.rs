@@ -21,6 +21,13 @@ pub struct EchoState {
     pub sessions: SessionStore,
 }
 
+/// Echo-mode CreateSessionResponse (no contract_hash).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct EchoCreateSessionResponse {
+    pub session_id: String,
+    pub tee_session_pubkey: String,
+}
+
 /// GET /tee/info — return enclave identity (no session key).
 pub async fn tee_info(State(state): State<Arc<EchoState>>) -> Json<TeeInfoResponse> {
     Json(TeeInfoResponse::from(state.cvm.identity()))
@@ -29,7 +36,7 @@ pub async fn tee_info(State(state): State<Arc<EchoState>>) -> Json<TeeInfoRespon
 /// POST /sessions — create a new echo session with per-session ECDH keypair.
 pub async fn create_session(
     State(state): State<Arc<EchoState>>,
-) -> Result<Json<CreateSessionResponse>, StatusCode> {
+) -> Result<Json<EchoCreateSessionResponse>, StatusCode> {
     let (pubkey, secret) = state
         .cvm
         .derive_session_keypair()
@@ -39,14 +46,40 @@ pub async fn create_session(
     let session_id = session_uuid.to_string();
     let session_id_bytes: [u8; 16] = *session_uuid.as_bytes();
 
-    // Echo mode uses a dummy contract hash
+    // Echo mode uses a dummy contract hash and contract
     let contract_hash_bytes = vec![0u8; 32];
+    let dummy_contract = vault_family_types::Contract {
+        purpose_code: vault_family_types::Purpose::Mediation,
+        output_schema_id: "echo".to_string(),
+        output_schema: serde_json::json!({}),
+        participants: vec!["initiator".to_string(), "responder".to_string()],
+        prompt_template_hash: "0".repeat(64),
+        entropy_budget_bits: None,
+        timing_class: None,
+        metadata: serde_json::Value::Null,
+        model_profile_id: None,
+        enforcement_policy_hash: None,
+        output_schema_hash: None,
+        model_constraints: None,
+        max_completion_tokens: None,
+        session_ttl_secs: None,
+        invite_ttl_secs: None,
+        entropy_enforcement: None,
+        relay_verifying_key_hex: None,
+    };
 
-    let session = Session::new(session_id_bytes, contract_hash_bytes, secret, pubkey);
+    let session = Session::new(
+        session_id_bytes,
+        contract_hash_bytes,
+        "0".repeat(64),
+        dummy_contract,
+        secret,
+        pubkey,
+    );
 
     state.sessions.insert(session_id.clone(), session);
 
-    Ok(Json(CreateSessionResponse {
+    Ok(Json(EchoCreateSessionResponse {
         session_id,
         tee_session_pubkey: base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
@@ -58,8 +91,7 @@ pub async fn create_session(
 /// POST /sessions/:id/input — submit encrypted input for a role.
 ///
 /// All failure modes return the same 422 status + constant-shape body
-/// to prevent side-channel leaks (AAD mismatch, decrypt failure, parse
-/// failure, wrong role, duplicate submission).
+/// to prevent side-channel leaks.
 pub async fn submit_input(
     State(state): State<Arc<EchoState>>,
     Path(session_id): Path<String>,
@@ -78,7 +110,6 @@ pub async fn submit_input(
         _ => return Err(reject()),
     };
 
-    // Decode base64 fields
     let client_pubkey_bytes: [u8; 32] = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
         &req.client_ephemeral_pubkey,
@@ -97,18 +128,15 @@ pub async fn submit_input(
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &req.ciphertext)
             .map_err(|_| reject())?;
 
-    // Compute ciphertext hash for receipt commitments
     let ciphertext_hash = {
         let mut h = Sha256::new();
         h.update(&ciphertext);
         hex::encode(h.finalize())
     };
 
-    // Decrypt and store — all errors map to the same rejection
     let both_ready = state
         .sessions
         .with_session(&session_id, |session| {
-            // Duplicate submission protection
             if session.has_submitted(role) {
                 return Err(());
             }
@@ -162,7 +190,6 @@ pub async fn submit_input(
             .into_response());
     }
 
-    // Both inputs received — build echo response with attestation
     let echo = build_echo_response(&state, &session_id)
         .await
         .map_err(|_| reject())?;
@@ -170,13 +197,11 @@ pub async fn submit_input(
 }
 
 async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<EchoResponse, ()> {
-    // Extract session data (take ownership to zeroize after)
     let session = state.sessions.remove(session_id).ok_or(())?;
 
     let initiator_input = session.initiator_input.as_ref().ok_or(())?;
     let responder_input = session.responder_input.as_ref().ok_or(())?;
 
-    // Hash decrypted content — never return plaintext
     let initiator_hash = {
         let mut h = Sha256::new();
         h.update(initiator_input.as_slice());
@@ -188,12 +213,10 @@ async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<Echo
         hex::encode(h.finalize())
     };
 
-    // Build transcript hash for attestation binding
     let identity = state.cvm.identity();
     let initiator_sub_hash = session.initiator_ciphertext_hash.as_ref().ok_or(())?;
     let responder_sub_hash = session.responder_ciphertext_hash.as_ref().ok_or(())?;
 
-    // Echo mode: output_hash is hash of the two decrypted hashes concatenated
     let output_hash = {
         let mut h = Sha256::new();
         h.update(initiator_hash.as_bytes());
@@ -213,7 +236,6 @@ async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<Echo
     let transcript_hash = compute_transcript_hash(&transcript_inputs);
     let transcript_hash_hex = hex::encode(transcript_hash);
 
-    // Get attestation bound to transcript hash
     let report = state
         .cvm
         .get_attestation(&transcript_hash)

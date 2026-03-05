@@ -12,6 +12,7 @@ tee-core = { path = "../tee-core" }
 
 # VFC types
 receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "cb53ded" }
+vault-family-types = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "cb53ded" }
 
 # Web framework
 axum = "0.8"
@@ -37,6 +38,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Misc
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+reqwest = { version = "0.12", features = ["json"] }
+jsonschema = "0.28"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
