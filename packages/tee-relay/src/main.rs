@@ -6,6 +6,7 @@ use axum::routing::{get, post};
 use tracing::warn;
 
 use tee_core::SimulatedCvm;
+use tee_core::attestation::CvmRuntime;
 use tee_relay::handlers::{self, RelayState};
 use tee_relay::relay::AppState;
 use tee_relay::session::{SessionStore, start_session_reaper};
@@ -18,7 +19,7 @@ async fn main() {
             .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "unknown".to_string());
-        eprintln!("panic occurred at {location}");
+        eprintln!("panic occurred at {location}"); // SAFETY: no plaintext
     }));
 
     tracing_subscriber::fmt()
@@ -31,25 +32,63 @@ async fn main() {
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
-    let signing_pubkey_hex = std::env::var("AV_SIGNING_KEY_HEX").unwrap_or_else(|_| "0".repeat(64));
-    let cvm = Arc::new(SimulatedCvm::new(signing_pubkey_hex.clone()));
+    // CVM no longer depends on signing key — construct it once
+    let cvm = Arc::new(SimulatedCvm::new());
+
+    // Resolve signing key: env var override (dev only, blocked in real TEE) or seal/unseal lifecycle
+    let signing_key = if cvm.is_real_tee() {
+        if std::env::var("AV_SIGNING_KEY_HEX").is_ok() {
+            panic!(
+                "AV_SIGNING_KEY_HEX must not be set in real TEE mode — use seal/unseal lifecycle"
+            );
+        }
+        let data_dir =
+            std::env::var("AV_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/av-tee".to_string()); // SAFETY: no plaintext
+        let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
+        tracing::info!("Using seal/unseal key lifecycle (real TEE)"); // SAFETY: no plaintext
+        tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
+            .await
+            .expect("failed to load/generate sealed signing key")
+    } else {
+        match std::env::var("AV_SIGNING_KEY_HEX") {
+            Ok(hex_str) if hex_str != "0".repeat(64) => {
+                warn!("Using AV_SIGNING_KEY_HEX override (dev only)"); // SAFETY: no plaintext
+                let decoded = hex::decode(&hex_str).expect("AV_SIGNING_KEY_HEX is not valid hex");
+                let seed: [u8; 32] = decoded
+                    .try_into()
+                    .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)");
+                ed25519_dalek::SigningKey::from_bytes(&seed)
+            }
+            _ => {
+                let data_dir =
+                    std::env::var("AV_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/av-tee".to_string()); // SAFETY: no plaintext
+                let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
+                tracing::info!("Using seal/unseal key lifecycle"); // SAFETY: no plaintext
+                tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
+                    .await
+                    .expect("failed to load/generate sealed signing key")
+            }
+        }
+    };
+    let signing_pubkey_hex = hex::encode(signing_key.verifying_key().as_bytes());
 
     if echo_mode {
-        run_echo_mode(cvm).await;
+        run_echo_mode(cvm, &signing_pubkey_hex).await;
     } else {
-        run_relay_mode(cvm, signing_pubkey_hex).await;
+        run_relay_mode(cvm, signing_key).await;
     }
 }
 
-async fn run_echo_mode(cvm: Arc<SimulatedCvm>) {
+async fn run_echo_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: &str) {
     use tee_relay::echo::{self, EchoState};
 
-    warn!("ECHO MODE — NOT FOR PRODUCTION. Binds to 127.0.0.1 only.");
-    warn!("This relay uses SimulatedCvm with assurance_level: SelfAsserted.");
+    warn!("ECHO MODE — NOT FOR PRODUCTION. Binds to 127.0.0.1 only."); // SAFETY: no plaintext
+    warn!("This relay uses SimulatedCvm with assurance_level: SelfAsserted."); // SAFETY: no plaintext
 
     let state = Arc::new(EchoState {
         cvm,
         sessions: SessionStore::new(Duration::from_secs(600)),
+        receipt_signing_pubkey_hex: signing_pubkey_hex.to_string(),
     });
 
     let app = Router::new()
@@ -60,26 +99,13 @@ async fn run_echo_mode(cvm: Arc<SimulatedCvm>) {
 
     let bind = "127.0.0.1:3100";
     let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
-    tracing::info!("tee-relay echo listening on {bind}");
+    tracing::info!("tee-relay echo listening on {bind}"); // SAFETY: no plaintext
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: String) {
-    warn!("TEE RELAY MODE — SimulatedCvm (not production-secure).");
-    warn!("Phase 1: attestable receipts but no client-side verification tooling yet.");
-
-    // Derive signing key from the hex seed
-    let seed_bytes: [u8; 32] = if signing_pubkey_hex == "0".repeat(64) {
-        tracing::warn!("AV_SIGNING_KEY_HEX not set, using zero key (dev only)");
-        [0u8; 32]
-    } else {
-        let decoded =
-            hex::decode(&signing_pubkey_hex).expect("AV_SIGNING_KEY_HEX is not valid hex");
-        decoded
-            .try_into()
-            .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)")
-    };
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_key: ed25519_dalek::SigningKey) {
+    warn!("TEE RELAY MODE — SimulatedCvm (not production-secure)."); // SAFETY: no plaintext
+    warn!("Phase 1: attestable receipts but no client-side verification tooling yet."); // SAFETY: no plaintext
 
     let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
     let anthropic_model_id =
@@ -129,6 +155,6 @@ async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: String) {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
-    tracing::info!("tee-relay listening on {bind}");
+    tracing::info!("tee-relay listening on {bind}"); // SAFETY: no plaintext
     axum::serve(listener, app).await.unwrap();
 }

@@ -24,7 +24,8 @@ pub enum CvmError {
 /// test measurements and a self-signed attestation chain.
 #[async_trait]
 pub trait CvmRuntime: Send + Sync {
-    /// Static enclave identity (measurement, platform, signing pubkey).
+    /// Static enclave identity (measurement, platform). Does not include
+    /// application keys — those are owned by the relay, not the CVM.
     fn identity(&self) -> &EnclaveIdentity;
 
     /// Fetch attestation report binding `user_data` to the CVM measurement.
@@ -50,12 +51,15 @@ pub trait CvmRuntime: Send + Sync {
     fn is_real_tee(&self) -> bool;
 }
 
+/// Version prefix for sealed blobs. Allows future seal format rotation.
+const SEAL_VERSION_PREFIX: &[u8] = b"av-tee-seal-v1";
+
 /// Simulated CVM for local development and testing.
 ///
 /// - Measurement: `SHA-256("av-tee-simulated-v1")`
 /// - `tee_type: Simulated` (always explicit, never omitted)
 /// - Attestation: deterministic dummy quote
-/// - seal/unseal: AES-256-GCM with measurement-derived key
+/// - seal/unseal: AES-256-GCM with measurement-derived key and random nonce
 pub struct SimulatedCvm {
     identity: EnclaveIdentity,
     seal_key: [u8; 32],
@@ -65,7 +69,7 @@ pub struct SimulatedCvm {
 pub const SIMULATED_MEASUREMENT_INPUT: &str = "av-tee-simulated-v1";
 
 impl SimulatedCvm {
-    pub fn new(receipt_signing_pubkey_hex: String) -> Self {
+    pub fn new() -> Self {
         let measurement = {
             let mut h = Sha256::new();
             h.update(SIMULATED_MEASUREMENT_INPUT.as_bytes());
@@ -85,10 +89,15 @@ impl SimulatedCvm {
             tee_type: TeeType::Simulated,
             measurement,
             platform_version: "simulated-v1".to_string(),
-            receipt_signing_pubkey_hex,
         };
 
         Self { identity, seal_key }
+    }
+}
+
+impl Default for SimulatedCvm {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -118,28 +127,55 @@ impl CvmRuntime for SimulatedCvm {
         Ok((public, Zeroizing::new(secret)))
     }
 
+    /// Seal format: `PREFIX || random_nonce[12] || ciphertext`
+    ///
+    /// Uses a random nonce every time. AES-GCM requires unique nonces per
+    /// encryption under the same key — a fixed nonce violates this even when
+    /// the plaintext is high-entropy key material.
     async fn seal(&self, data: &[u8]) -> Result<Vec<u8>, CvmError> {
         use aes_gcm::aead::{Aead, KeyInit};
         use aes_gcm::{Aes256Gcm, Nonce};
 
         let cipher = Aes256Gcm::new_from_slice(&self.seal_key)
             .map_err(|e| CvmError::SealError(e.to_string()))?;
-        // Use a fixed nonce for simulated sealing (deterministic for testing)
-        let nonce = Nonce::from_slice(&[0u8; 12]);
-        cipher
+
+        let mut nonce_bytes = [0u8; 12];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let encrypted = cipher
             .encrypt(nonce, data)
-            .map_err(|e| CvmError::SealError(e.to_string()))
+            .map_err(|e| CvmError::SealError(e.to_string()))?;
+
+        let mut blob = Vec::with_capacity(SEAL_VERSION_PREFIX.len() + 12 + encrypted.len());
+        blob.extend_from_slice(SEAL_VERSION_PREFIX);
+        blob.extend_from_slice(&nonce_bytes);
+        blob.extend(encrypted);
+        Ok(blob)
     }
 
     async fn unseal(&self, sealed: &[u8]) -> Result<Vec<u8>, CvmError> {
         use aes_gcm::aead::{Aead, KeyInit};
         use aes_gcm::{Aes256Gcm, Nonce};
 
+        if !sealed.starts_with(SEAL_VERSION_PREFIX) {
+            return Err(CvmError::SealError(
+                "sealed blob missing version prefix (expected av-tee-seal-v1)".into(),
+            ));
+        }
+        let rest = &sealed[SEAL_VERSION_PREFIX.len()..];
+        if rest.len() < 12 {
+            return Err(CvmError::SealError(
+                "sealed blob too short for nonce".into(),
+            ));
+        }
+        let (nonce_bytes, ciphertext) = rest.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
         let cipher = Aes256Gcm::new_from_slice(&self.seal_key)
             .map_err(|e| CvmError::SealError(e.to_string()))?;
-        let nonce = Nonce::from_slice(&[0u8; 12]);
         cipher
-            .decrypt(nonce, sealed)
+            .decrypt(nonce, ciphertext)
             .map_err(|e| CvmError::SealError(e.to_string()))
     }
 
@@ -153,7 +189,7 @@ mod tests {
     use super::*;
 
     fn test_cvm() -> SimulatedCvm {
-        SimulatedCvm::new("deadbeef".repeat(8))
+        SimulatedCvm::new()
     }
 
     #[test]
@@ -167,6 +203,15 @@ mod tests {
         let cvm1 = test_cvm();
         let cvm2 = test_cvm();
         assert_eq!(cvm1.identity().measurement, cvm2.identity().measurement);
+    }
+
+    #[test]
+    fn identity_does_not_contain_signing_key() {
+        let cvm = test_cvm();
+        let id = cvm.identity();
+        // EnclaveIdentity has no receipt_signing_pubkey_hex field
+        assert!(!id.measurement.is_empty());
+        assert!(!id.platform_version.is_empty());
     }
 
     #[test]
@@ -185,13 +230,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seal_uses_versioned_prefix() {
+        let cvm = test_cvm();
+        let data = b"test-key-material";
+        let sealed = cvm.seal(data).await.unwrap();
+        assert!(sealed.starts_with(SEAL_VERSION_PREFIX));
+    }
+
+    #[tokio::test]
+    async fn seal_is_not_deterministic() {
+        let cvm = test_cvm();
+        let data = b"same-key-material";
+        let sealed1 = cvm.seal(data).await.unwrap();
+        let sealed2 = cvm.seal(data).await.unwrap();
+        assert_ne!(sealed1, sealed2, "seal must use random nonce");
+    }
+
+    #[tokio::test]
     async fn seal_unseal_roundtrip() {
         let cvm = test_cvm();
         let data = b"secret key material";
         let sealed = cvm.seal(data).await.unwrap();
-        assert_ne!(sealed, data);
+        assert_ne!(sealed.as_slice(), data);
         let unsealed = cvm.unseal(&sealed).await.unwrap();
         assert_eq!(unsealed, data);
+    }
+
+    #[tokio::test]
+    async fn unseal_rejects_unversioned_blob() {
+        let cvm = test_cvm();
+        let raw = vec![0u8; 48];
+        assert!(cvm.unseal(&raw).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unseal_rejects_truncated_blob() {
+        let cvm = test_cvm();
+        // Just the prefix with no nonce or ciphertext
+        let mut short = SEAL_VERSION_PREFIX.to_vec();
+        short.extend_from_slice(&[0u8; 5]); // too short for 12-byte nonce
+        assert!(cvm.unseal(&short).await.is_err());
     }
 
     #[test]

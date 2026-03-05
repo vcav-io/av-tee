@@ -1,0 +1,43 @@
+name: Enclave Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: av-tee-relay
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build enclave image
+        run: |
+          docker build -f Dockerfile.enclave -t "$IMAGE_NAME:$GITHUB_SHA" .
+
+      - name: Extract artifact hash
+        run: |
+          CONTAINER_ID=$(docker create "$IMAGE_NAME:$GITHUB_SHA")
+          docker cp "$CONTAINER_ID:/usr/local/bin/tee-relay" /tmp/tee-relay-artifact
+          docker rm "$CONTAINER_ID" > /dev/null
+          ARTIFACT_HASH=$(sha256sum /tmp/tee-relay-artifact | awk '{print $1}')
+          rm /tmp/tee-relay-artifact
+          echo "artifact_hash=$ARTIFACT_HASH" >> "$GITHUB_OUTPUT"
+          echo "### Enclave Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **artifact_hash**: \`$ARTIFACT_HASH\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **NOTE**: artifact_hash is the binary sha256, NOT the SNP measurement" >> "$GITHUB_STEP_SUMMARY"
+        id: artifact
+
+      - name: Save image as artifact
+        run: |
+          docker save "$IMAGE_NAME:$GITHUB_SHA" | gzip > enclave-image.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enclave-image
+          path: enclave-image.tar.gz
+          retention-days: 90

@@ -9,10 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 tee-core = { path = "../tee-core" }
+tee-transcript = { path = "../tee-transcript" }
 
 # VFC types
-receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "cb53ded" }
-vault-family-types = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "cb53ded" }
+receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "ecd5db4" }
+vault-family-types = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "ecd5db4" }
 
 # Web framework
 axum = "0.8"
@@ -44,4 +45,5 @@ jsonschema = "0.28"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

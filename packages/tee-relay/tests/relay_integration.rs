@@ -9,12 +9,12 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use tee_core::SimulatedCvm;
 use tee_core::crypto::{build_aad, encrypt_payload};
-use tee_core::transcript::{TranscriptInputs, compute_transcript_hash};
 use tee_core::types::ParticipantRole;
 use tee_relay::handlers::{self, RelayState};
 use tee_relay::relay::AppState;
 use tee_relay::session::SessionStore;
 use tee_relay::types::*;
+use tee_transcript::{TranscriptInputs, compute_transcript_hash};
 
 /// Start a mock Anthropic API server that returns an HTTP error.
 async fn start_failing_mock_provider(status_code: u16) -> String {
@@ -92,7 +92,7 @@ fn test_contract() -> vault_family_types::Contract {
 }
 
 fn test_relay_state(mock_url: &str) -> Arc<RelayState> {
-    let cvm = Arc::new(SimulatedCvm::new("bb".repeat(32)));
+    let cvm = Arc::new(SimulatedCvm::new());
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0xBBu8; 32]);
 
     Arc::new(RelayState {

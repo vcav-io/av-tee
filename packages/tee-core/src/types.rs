@@ -1,17 +1,16 @@
 use receipt_core::TeeType;
 use serde::{Deserialize, Serialize};
 
-/// Enclave identity — returned by `GET /tee/info`.
+/// Enclave identity — the CVM's static hardware/software identity.
 ///
-/// Does NOT contain session keys. Per-session ECDH pubkeys are returned
-/// only from `POST /sessions` to enforce forward secrecy.
+/// Does NOT contain session keys or application keys. The receipt signing
+/// pubkey is an application concern (lives in `AppState`), not a CVM concern.
+/// Per-session ECDH pubkeys are returned only from `POST /sessions`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnclaveIdentity {
     pub tee_type: TeeType,
     pub measurement: String,
     pub platform_version: String,
-    /// Ed25519 verifying key (hex) of the sealed receipt signing key.
-    pub receipt_signing_pubkey_hex: String,
 }
 
 /// Encrypted input payload from a client.

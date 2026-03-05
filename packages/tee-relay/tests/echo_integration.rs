@@ -15,10 +15,11 @@ use tee_relay::session::SessionStore;
 use tee_relay::types::*;
 
 fn test_app() -> Router {
-    let cvm = Arc::new(SimulatedCvm::new("aa".repeat(32)));
+    let cvm = Arc::new(SimulatedCvm::new());
     let state = Arc::new(EchoState {
         cvm,
         sessions: SessionStore::new(Duration::from_secs(600)),
+        receipt_signing_pubkey_hex: "aa".repeat(32),
     });
     Router::new()
         .route("/tee/info", get(echo::tee_info))

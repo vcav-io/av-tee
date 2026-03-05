@@ -12,8 +12,8 @@ pub struct TeeInfoResponse {
     pub receipt_signing_pubkey_hex: String,
 }
 
-impl From<&EnclaveIdentity> for TeeInfoResponse {
-    fn from(id: &EnclaveIdentity) -> Self {
+impl TeeInfoResponse {
+    pub fn from_identity_and_pubkey(id: &EnclaveIdentity, pubkey_hex: &str) -> Self {
         Self {
             tee_type: serde_json::to_value(id.tee_type)
                 .ok()
@@ -21,7 +21,7 @@ impl From<&EnclaveIdentity> for TeeInfoResponse {
                 .unwrap_or_else(|| format!("{:?}", id.tee_type)),
             measurement: id.measurement.clone(),
             platform_version: id.platform_version.clone(),
-            receipt_signing_pubkey_hex: id.receipt_signing_pubkey_hex.clone(),
+            receipt_signing_pubkey_hex: pubkey_hex.to_string(),
         }
     }
 }

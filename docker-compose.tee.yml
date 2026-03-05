@@ -1,0 +1,17 @@
+services:
+  tee-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.enclave
+    ports:
+      - "3100:3100"
+    environment:
+      - RUST_LOG=info
+      - AV_TEE_DATA_DIR=/var/lib/av-tee
+      # Standard relay mode by default. For echo testing:
+      # - AV_TEE_ECHO_MODE=true
+    volumes:
+      - tee-data:/var/lib/av-tee
+
+volumes:
+  tee-data:
