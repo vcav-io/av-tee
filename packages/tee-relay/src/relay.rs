@@ -112,9 +112,9 @@ pub async fn relay_core(
 
     // 2. Parse decrypted inputs
     let input_a: DecryptedInput = serde_json::from_slice(initiator_plaintext.as_slice())
-        .map_err(|e| RelayError::ContractValidation(format!("invalid initiator input: {e}")))?;
+        .map_err(|_| RelayError::ContractValidation("invalid initiator input".to_string()))?;
     let input_b: DecryptedInput = serde_json::from_slice(responder_plaintext.as_slice())
-        .map_err(|e| RelayError::ContractValidation(format!("invalid responder input: {e}")))?;
+        .map_err(|_| RelayError::ContractValidation("invalid responder input".to_string()))?;
 
     // 3. Compute input commitments (hash of plaintext context, per participant)
     let input_commitments: Vec<InputCommitment> = {

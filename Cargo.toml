@@ -1,3 +1,10 @@
 [workspace]
 members = ["packages/*"]
 resolver = "2"
+
+# Disable backtraces in release builds (plaintext defense-in-depth).
+[profile.release]
+debug = false
+
+[profile.release.build-override]
+debug = false
