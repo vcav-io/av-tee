@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 tee-core = { path = "../tee-core" }
+tee-transcript = { path = "../tee-transcript" }
 
 # VFC types
 receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "cb53ded" }

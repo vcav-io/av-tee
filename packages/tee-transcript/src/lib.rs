@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use sha2::{Digest, Sha512};
 
 pub const TRANSCRIPT_VERSION: &str = "av-tee-transcript-v1";

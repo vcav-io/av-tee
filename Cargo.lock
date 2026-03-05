@@ -1897,6 +1897,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tee-transcript",
  "thiserror",
  "tokio",
  "x25519-dalek",
@@ -1920,6 +1921,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tee-core",
+ "tee-transcript",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1929,6 +1931,14 @@ dependencies = [
  "vault-family-types",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "tee-transcript"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "sha2",
 ]
 
 [[package]]

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use tee_core::attestation::CvmRuntime;
-use tee_core::transcript::{TranscriptInputs, compute_transcript_hash};
+use tee_transcript::{TranscriptInputs, compute_transcript_hash};
 
 use crate::error::RelayError;
 use crate::provider::ProviderRequest;

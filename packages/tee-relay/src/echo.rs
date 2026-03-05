@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use tee_core::attestation::CvmRuntime;
 use tee_core::crypto::{build_aad, decrypt_payload};
-use tee_core::transcript::{TranscriptInputs, compute_transcript_hash};
 use tee_core::types::ParticipantRole;
+use tee_transcript::{TranscriptInputs, compute_transcript_hash};
 
 use crate::session::{Session, SessionStore};
 use crate::types::*;
