@@ -11,10 +11,14 @@
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | tee-verifier location | `av-tee/packages/tee-verifier` | Keeps TEE trust boundary self-contained; av-claude is a consumer |
+| Transcript hashing | Extracted to `tee-transcript` crate (shared) | Verifier must not import producer's code; both depend on shared crate |
 | Transparency log | Define interface + static allowlist; defer log service | Avoids infrastructure burden; allowlist is the real security boundary |
 | Reproducible builds | Docker-based (OCI image) | Natural unit for CVM deployment; matches Azure/GCP confidential containers |
 | Documentation | Both repos: av-claude gets lane framing, av-tee gets TEE threat model | Protocol-level framing vs implementation-level detail |
 | Key rotation | Attestation-bound (rotation = enclave restart) | Simplest correct approach; attestation already binds pubkey via transcript hash |
+| CVM identity | Decoupled from signing pubkey | CVM identity = {tee_type, measurement, platform_version}; signing key is app concern |
+| Seal nonce | Random nonce prepended to ciphertext | Fixed nonce violates AES-GCM requirements; random nonce even for simulated mode |
+| VFC prerequisite | Add `user_data_hex` to `TeeAttestation` | Enables transcript verification without platform-specific quote parsing |
 
 ---
 
