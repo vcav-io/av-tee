@@ -1,0 +1,19 @@
+# --- Build stage ---
+FROM rust:1.88.0-bookworm AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY packages/ packages/
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+RUN cargo build --release -p tee-relay
+
+# --- Runtime stage ---
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+RUN useradd --system --no-create-home avtee
+USER avtee
+COPY --from=builder /build/target/release/tee-relay /usr/local/bin/tee-relay
+VOLUME ["/var/lib/av-tee"]
+ENV AV_TEE_DATA_DIR=/var/lib/av-tee
+EXPOSE 3100
+ENTRYPOINT ["tee-relay"]
