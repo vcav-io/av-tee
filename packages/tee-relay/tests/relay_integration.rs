@@ -84,7 +84,7 @@ fn test_relay_state(mock_url: &str) -> Arc<RelayState> {
             max_completion_tokens: 4096,
             operator_id: "test-operator".to_string(),
         },
-        sessions: SessionStore::new(Duration::from_secs(600)),
+        sessions: Arc::new(SessionStore::new(Duration::from_secs(600))),
     })
 }
 

@@ -25,6 +25,18 @@ pub struct AppState {
     pub operator_id: String,
 }
 
+// Manual Debug to prevent signing key / API key leaking via panic/log.
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("signing_key", &"[REDACTED]")
+            .field("anthropic_api_key", &"[REDACTED]")
+            .field("anthropic_model_id", &self.anthropic_model_id)
+            .field("operator_id", &self.operator_id)
+            .finish()
+    }
+}
+
 /// Input from a single participant (decrypted inside the CVM).
 #[derive(serde::Deserialize)]
 pub struct DecryptedInput {
@@ -82,6 +94,7 @@ fn canonical_sha256(value: &impl serde::Serialize) -> Result<String, RelayError>
 /// function returns (serde_json::Value is not zeroized — see CLAUDE.md known limitations).
 #[allow(clippy::too_many_arguments)]
 pub async fn relay_core(
+    session_id: &str,
     contract: &vault_family_types::Contract,
     initiator_plaintext: &Zeroizing<Vec<u8>>,
     responder_plaintext: &Zeroizing<Vec<u8>>,
@@ -203,6 +216,7 @@ pub async fn relay_core(
     let schema_hash = canonical_sha256(&contract.output_schema)?;
 
     let receipt_v2 = build_tee_receipt_v2(
+        session_id,
         contract_hash_hex,
         &schema_hash,
         &output,
@@ -225,6 +239,7 @@ pub async fn relay_core(
 /// Build and sign a TEE-mode v2 receipt with attestation binding.
 #[allow(clippy::too_many_arguments)]
 async fn build_tee_receipt_v2(
+    session_id: &str,
     contract_hash: &str,
     schema_hash: &str,
     output: &serde_json::Value,
@@ -270,16 +285,23 @@ async fn build_tee_receipt_v2(
     // Compute operator key fingerprint
     let verifying_key_hex = receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
     let operator_key_fingerprint = {
-        let key_bytes = hex::decode(&verifying_key_hex).unwrap_or_default();
+        let key_bytes = hex::decode(&verifying_key_hex)
+            .map_err(|e| RelayError::Internal(format!("own verifying key is invalid hex: {e}")))?;
         let mut hasher = Sha256::new();
         hasher.update(&key_bytes);
         hex::encode(hasher.finalize())
     };
 
-    let provider_latency_ms = (inference_end - inference_start)
+    let provider_latency_ms: Option<u64> = match (inference_end - inference_start)
         .num_milliseconds()
         .try_into()
-        .unwrap_or(0u64);
+    {
+        Ok(ms) => Some(ms),
+        Err(_) => {
+            tracing::warn!("negative provider latency detected (clock skew?), omitting");
+            None
+        }
+    };
 
     // Assurance level: TeeAttested for real TEE, SelfAsserted for simulated
     let assurance_level = if state.cvm.is_real_tee() {
@@ -296,7 +318,7 @@ async fn build_tee_receipt_v2(
         receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
         receipt_canonicalization: CANONICALIZATION_V2.to_string(),
         receipt_id: uuid::Uuid::new_v4().to_string(),
-        session_id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
         issued_at: Utc::now(),
         assurance_level,
         operator: Operator {
@@ -330,7 +352,7 @@ async fn build_tee_receipt_v2(
             runtime_hash_asserted: None,
             runtime_hash_attested: None,
             budget_enforcement_mode: None,
-            provider_latency_ms: Some(provider_latency_ms),
+            provider_latency_ms,
             token_usage: None,
             relay_software_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             status: Some(SessionStatus::Success),
@@ -344,9 +366,14 @@ async fn build_tee_receipt_v2(
         },
         provider_attestation: None,
         tee_attestation: Some(TeeAttestation {
-            tee_type: tee_type_value.map(|s| {
-                serde_json::from_value(serde_json::Value::String(s))
-                    .unwrap_or(receipt_core::TeeType::Simulated)
+            tee_type: tee_type_value.and_then(|s| {
+                match serde_json::from_value(serde_json::Value::String(s.clone())) {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        tracing::error!("failed to deserialize tee_type '{s}': {e}, omitting");
+                        None
+                    }
+                }
             }),
             measurement: Some(report.measurement),
             quote: Some(base64::Engine::encode(
@@ -366,6 +393,7 @@ async fn build_tee_receipt_v2(
 /// Build a failure receipt for an aborted TEE session.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_failure_receipt_v2(
+    session_id: &str,
     contract_hash: &str,
     schema_hash: &str,
     initiator_submission_hash: Option<&str>,
@@ -404,7 +432,8 @@ pub async fn build_failure_receipt_v2(
 
     let verifying_key_hex = receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
     let operator_key_fingerprint = {
-        let key_bytes = hex::decode(&verifying_key_hex).unwrap_or_default();
+        let key_bytes = hex::decode(&verifying_key_hex)
+            .map_err(|e| RelayError::Internal(format!("own verifying key is invalid hex: {e}")))?;
         let mut hasher = Sha256::new();
         hasher.update(&key_bytes);
         hex::encode(hasher.finalize())
@@ -424,7 +453,7 @@ pub async fn build_failure_receipt_v2(
         receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
         receipt_canonicalization: CANONICALIZATION_V2.to_string(),
         receipt_id: uuid::Uuid::new_v4().to_string(),
-        session_id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
         issued_at: Utc::now(),
         assurance_level,
         operator: Operator {
@@ -471,9 +500,14 @@ pub async fn build_failure_receipt_v2(
         },
         provider_attestation: None,
         tee_attestation: Some(TeeAttestation {
-            tee_type: tee_type_value.map(|s| {
-                serde_json::from_value(serde_json::Value::String(s))
-                    .unwrap_or(receipt_core::TeeType::Simulated)
+            tee_type: tee_type_value.and_then(|s| {
+                match serde_json::from_value(serde_json::Value::String(s.clone())) {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        tracing::error!("failed to deserialize tee_type '{s}': {e}, omitting");
+                        None
+                    }
+                }
             }),
             measurement: Some(report.measurement),
             quote: Some(base64::Engine::encode(

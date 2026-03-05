@@ -45,8 +45,13 @@ impl RelayError {
 impl IntoResponse for RelayError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+        // Sanitize 5xx errors — never expose internal details to clients
+        let user_message = match &self {
+            RelayError::ReceiptSigning(_) | RelayError::Internal(_) => "internal error".to_string(),
+            _ => self.to_string(),
+        };
         let body = serde_json::json!({
-            "error": self.to_string(),
+            "error": user_message,
         });
         (status, axum::Json(body)).into_response()
     }

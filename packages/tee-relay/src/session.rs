@@ -121,31 +121,46 @@ impl SessionStore {
         }
     }
 
+    /// Lock the session map, recovering from poison if a prior panic occurred.
+    fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
+        match self.sessions.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("session store mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     pub fn insert(&self, id: String, session: Session) {
-        self.sessions.lock().unwrap().insert(id, session);
+        self.lock_sessions().insert(id, session);
     }
 
     pub fn with_session<F, R>(&self, id: &str, f: F) -> Option<R>
     where
         F: FnOnce(&mut Session) -> R,
     {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.lock_sessions();
         sessions.get_mut(id).map(f)
     }
 
     pub fn remove(&self, id: &str) -> Option<Session> {
-        self.sessions.lock().unwrap().remove(id)
+        self.lock_sessions().remove(id)
     }
 
     /// Reap expired sessions. Returns number removed.
     pub fn reap_expired(&self) -> usize {
         let now = std::time::Instant::now();
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.lock_sessions();
         let before = sessions.len();
+        // Hard cap for Processing sessions (5 minutes) to prevent leaked sessions
+        let processing_max = Duration::from_secs(300);
         sessions.retain(|_, session| {
-            // Don't reap sessions with inference in flight
-            session.state == SessionState::Processing
-                || now.duration_since(session.created_at) < self.ttl
+            let age = now.duration_since(session.created_at);
+            match session.state {
+                SessionState::Processing => age < processing_max,
+                _ => age < self.ttl,
+            }
         });
         before - sessions.len()
     }

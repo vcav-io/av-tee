@@ -17,7 +17,7 @@ use crate::types::*;
 /// Shared state for the relay, wrapping AppState + SessionStore.
 pub struct RelayState {
     pub app: AppState,
-    pub sessions: SessionStore,
+    pub sessions: std::sync::Arc<SessionStore>,
 }
 
 /// GET /tee/info — return enclave identity.
@@ -30,11 +30,10 @@ pub async fn create_session(
     State(state): State<Arc<RelayState>>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, StatusCode> {
-    let (pubkey, secret) = state
-        .app
-        .cvm
-        .derive_session_keypair()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (pubkey, secret) = state.app.cvm.derive_session_keypair().map_err(|e| {
+        tracing::error!("session keypair derivation failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let session_uuid = Uuid::new_v4();
     let session_id = session_uuid.to_string();
@@ -42,15 +41,19 @@ pub async fn create_session(
 
     // Compute contract hash for binding
     let contract_hash_hex = {
-        let canonical = receipt_core::canonicalize_serializable(&req.contract)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let canonical = receipt_core::canonicalize_serializable(&req.contract).map_err(|e| {
+            tracing::error!("contract canonicalization failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         let mut hasher = Sha256::new();
         hasher.update(canonical.as_bytes());
         hex::encode(hasher.finalize())
     };
 
-    let contract_hash_bytes =
-        hex::decode(&contract_hash_hex).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let contract_hash_bytes = hex::decode(&contract_hash_hex).map_err(|e| {
+        tracing::error!("contract hash hex decode failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let session = Session::new(
         session_id_bytes,
@@ -184,8 +187,23 @@ pub async fn submit_input(
     // Both inputs received — spawn inference in background
     let state_clone = state.clone();
     let session_id_clone = session_id.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         run_inference(state_clone, session_id_clone).await;
+    });
+    // Watch for panics in the inference task
+    let state_watch = state.clone();
+    let session_id_watch = session_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            tracing::error!(session_id = %session_id_watch, "inference task panicked: {e}");
+            state_watch
+                .sessions
+                .with_session(&session_id_watch, |session| {
+                    session.state = SessionState::Aborted;
+                    session.abort_signal = Some("internal_panic".to_string());
+                    session.clear_inputs();
+                });
+        }
     });
 
     Ok((
@@ -244,11 +262,15 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
                 h.update(c.as_bytes());
                 hex::encode(h.finalize())
             }
-            Err(_) => hex::encode(Sha256::digest(b"")),
+            Err(e) => {
+                tracing::error!(session_id = %session_id, "schema canonicalization failed for failure receipt: {e}");
+                hex::encode(Sha256::digest(b""))
+            }
         }
     };
 
     let result = relay::relay_core(
+        &session_id,
         &contract,
         &initiator_input,
         &responder_input,
@@ -272,6 +294,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
             tracing::warn!(session_id = %session_id, "inference failed: {e}");
             // Build failure receipt
             let failure_receipt = relay::build_failure_receipt_v2(
+                &session_id,
                 &contract_hash_hex,
                 &schema_hash,
                 Some(&init_ct_hash),
@@ -284,7 +307,13 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
             state.sessions.with_session(&session_id, |session| {
                 session.state = SessionState::Aborted;
                 session.abort_signal = Some(e.to_string());
-                session.receipt_v2 = failure_receipt.ok();
+                session.receipt_v2 = match failure_receipt {
+                    Ok(r) => Some(r),
+                    Err(re) => {
+                        tracing::error!(session_id = %session_id, "failed to build failure receipt: {re}");
+                        None
+                    }
+                };
                 session.clear_inputs();
             });
         }

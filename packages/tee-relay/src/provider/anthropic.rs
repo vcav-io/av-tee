@@ -35,6 +35,17 @@ pub struct AnthropicProvider {
     base_url: String,
 }
 
+// Manual Debug to prevent API key leaking via panic/log.
+impl std::fmt::Debug for AnthropicProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicProvider")
+            .field("api_key", &"[REDACTED]")
+            .field("model_id", &self.model_id)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
 impl AnthropicProvider {
     pub fn new(
         api_key: String,
@@ -67,15 +78,17 @@ impl AnthropicProvider {
         if let Some(ref schema) = request.output_schema {
             let mut cleaned = schema.clone();
             strip_unsupported_keywords(&mut cleaned);
-            body.as_object_mut().unwrap().insert(
-                "output_config".to_string(),
-                serde_json::json!({
-                    "format": {
-                        "type": "json_schema",
-                        "schema": cleaned
-                    }
-                }),
-            );
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert(
+                    "output_config".to_string(),
+                    serde_json::json!({
+                        "format": {
+                            "type": "json_schema",
+                            "schema": cleaned
+                        }
+                    }),
+                );
+            }
         }
 
         let url = format!("{}/v1/messages", self.base_url);

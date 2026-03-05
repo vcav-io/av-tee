@@ -69,12 +69,15 @@ async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: String) {
     warn!("Phase 1: attestable receipts but no client-side verification tooling yet.");
 
     // Derive signing key from the hex seed
-    let seed_bytes: [u8; 32] = {
-        let decoded = hex::decode(&signing_pubkey_hex).unwrap_or_else(|_| vec![0u8; 32]);
-        let mut buf = [0u8; 32];
-        let len = decoded.len().min(32);
-        buf[..len].copy_from_slice(&decoded[..len]);
-        buf
+    let seed_bytes: [u8; 32] = if signing_pubkey_hex == "0".repeat(64) {
+        tracing::warn!("AV_SIGNING_KEY_HEX not set, using zero key (dev only)");
+        [0u8; 32]
+    } else {
+        let decoded =
+            hex::decode(&signing_pubkey_hex).expect("AV_SIGNING_KEY_HEX is not valid hex");
+        decoded
+            .try_into()
+            .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)")
     };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
 
@@ -108,7 +111,7 @@ async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: String) {
 
     let state = Arc::new(RelayState {
         app: app_state,
-        sessions: SessionStore::new(Duration::from_secs(session_ttl)),
+        sessions,
     });
 
     let port: u16 = std::env::var("AV_PORT")
