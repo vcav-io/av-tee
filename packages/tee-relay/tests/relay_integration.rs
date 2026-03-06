@@ -304,6 +304,9 @@ async fn full_relay_roundtrip_with_receipt() {
     assert!(tee_att.transcript_hash_hex.is_some());
     assert_eq!(tee_att.transcript_hash_hex.as_ref().unwrap().len(), 128);
 
+    // tee_type should be Simulated (direct assignment, no JSON round-trip)
+    assert_eq!(tee_att.tee_type, Some(receipt_core::TeeType::Simulated));
+
     // receipt_signing_pubkey_hex should match /tee/info
     assert_eq!(
         tee_att.receipt_signing_pubkey_hex.as_ref().unwrap(),
@@ -705,7 +708,8 @@ async fn relay_failure_receipt_on_provider_error() {
         Some(receipt_core::ExecutionLaneV2::Tee)
     );
     // TEE attestation should still be populated on failure receipts
-    assert!(receipt.tee_attestation.is_some());
+    let tee_att = receipt.tee_attestation.as_ref().unwrap();
+    assert_eq!(tee_att.tee_type, Some(receipt_core::TeeType::Simulated));
 
     // Schema hash must be a real canonicalized hash, NOT the sha256 of empty string
     let empty_string_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

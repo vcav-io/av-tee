@@ -310,10 +310,6 @@ async fn build_tee_receipt_v2(
         AssuranceLevel::SelfAsserted
     };
 
-    let tee_type_value = serde_json::to_value(report.tee_type)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from));
-
     let unsigned = UnsignedReceiptV2 {
         receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
         receipt_canonicalization: CANONICALIZATION_V2.to_string(),
@@ -366,15 +362,7 @@ async fn build_tee_receipt_v2(
         },
         provider_attestation: None,
         tee_attestation: Some(TeeAttestation {
-            tee_type: tee_type_value.and_then(|s| {
-                match serde_json::from_value(serde_json::Value::String(s.clone())) {
-                    Ok(t) => Some(t),
-                    Err(e) => {
-                        tracing::error!("failed to deserialize tee_type '{s}': {e}, omitting"); // SAFETY: no plaintext
-                        None
-                    }
-                }
-            }),
+            tee_type: Some(report.tee_type),
             measurement: Some(report.measurement),
             quote: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
@@ -447,10 +435,6 @@ pub async fn build_failure_receipt_v2(
         AssuranceLevel::SelfAsserted
     };
 
-    let tee_type_value = serde_json::to_value(report.tee_type)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from));
-
     let unsigned = UnsignedReceiptV2 {
         receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
         receipt_canonicalization: CANONICALIZATION_V2.to_string(),
@@ -502,15 +486,7 @@ pub async fn build_failure_receipt_v2(
         },
         provider_attestation: None,
         tee_attestation: Some(TeeAttestation {
-            tee_type: tee_type_value.and_then(|s| {
-                match serde_json::from_value(serde_json::Value::String(s.clone())) {
-                    Ok(t) => Some(t),
-                    Err(e) => {
-                        tracing::error!("failed to deserialize tee_type '{s}': {e}, omitting"); // SAFETY: no plaintext
-                        None
-                    }
-                }
-            }),
+            tee_type: Some(report.tee_type),
             measurement: Some(report.measurement),
             quote: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
