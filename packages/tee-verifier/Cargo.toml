@@ -22,3 +22,7 @@ toml = "0.8"
 
 # Error handling
 thiserror = "1"
+
+[dev-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
