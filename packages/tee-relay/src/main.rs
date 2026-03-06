@@ -111,16 +111,22 @@ async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_key: ed25519_dalek::Sign
     let anthropic_model_id =
         std::env::var("AV_MODEL_ID").unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
     let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
-    let max_completion_tokens: u32 = std::env::var("AV_MAX_COMPLETION_TOKENS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4096);
+    let max_completion_tokens: u32 = match std::env::var("AV_MAX_COMPLETION_TOKENS") {
+        Ok(v) => v.parse().unwrap_or_else(|e| {
+            tracing::warn!("AV_MAX_COMPLETION_TOKENS invalid ({v}: {e}), using default 4096");
+            4096
+        }),
+        Err(_) => 4096,
+    };
     let operator_id =
         std::env::var("AV_OPERATOR_ID").unwrap_or_else(|_| "av-tee-relay-dev".to_string());
-    let session_ttl: u64 = std::env::var("AV_SESSION_TTL_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(600);
+    let session_ttl: u64 = match std::env::var("AV_SESSION_TTL_SECS") {
+        Ok(v) => v.parse().unwrap_or_else(|e| {
+            tracing::warn!("AV_SESSION_TTL_SECS invalid ({v}: {e}), using default 600");
+            600
+        }),
+        Err(_) => 600,
+    };
 
     let sessions = Arc::new(SessionStore::new(Duration::from_secs(session_ttl)));
     start_session_reaper(sessions.clone());
@@ -140,10 +146,13 @@ async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_key: ed25519_dalek::Sign
         sessions,
     });
 
-    let port: u16 = std::env::var("AV_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3100);
+    let port: u16 = match std::env::var("AV_PORT") {
+        Ok(v) => v.parse().unwrap_or_else(|e| {
+            tracing::warn!("AV_PORT invalid ({v}: {e}), using default 3100");
+            3100
+        }),
+        Err(_) => 3100,
+    };
     let bind = format!("127.0.0.1:{port}");
 
     let app = Router::new()
