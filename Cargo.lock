@@ -1955,8 +1955,10 @@ name = "tee-verifier"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "chrono",
  "ed25519-dalek",
  "hex",
+ "rand",
  "receipt-core",
  "serde",
  "serde_json",

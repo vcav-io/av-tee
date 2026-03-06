@@ -6,6 +6,7 @@ use receipt_core::ReceiptV2;
 use tee_transcript::{TranscriptInputs, compute_transcript_hash};
 
 use crate::allowlist::TransparencySource;
+use crate::quote::{QuoteVerifier, QuoteVerifyError, cross_check_and_map};
 use crate::result::{
     AttestationHashStatus, AttestationStatus, SignatureStatus, TeeVerificationResult,
     TranscriptBinding,
@@ -22,6 +23,7 @@ pub enum VerifyError {
 pub fn verify_tee_receipt(
     receipt: &ReceiptV2,
     allowlist: &dyn TransparencySource,
+    quote_verifier: &dyn QuoteVerifier,
 ) -> Result<TeeVerificationResult, VerifyError> {
     let tee_att = receipt
         .tee_attestation
@@ -45,6 +47,9 @@ pub fn verify_tee_receipt(
     };
 
     // 2. Verify attestation_hash == sha256(base64_decode(quote))
+    // attestation_hash is hex(sha256(raw_quote_bytes)) where raw_quote_bytes
+    // are the exact bytes base64-encoded in tee_attestation.quote. No canonical
+    // wrapper, no certificate bundle — just the raw attestation report bytes.
     let attestation_hash_status = match (&tee_att.quote, &tee_att.attestation_hash) {
         (Some(quote_b64), Some(expected_hash)) => {
             let b64 = base64::engine::general_purpose::STANDARD;
@@ -61,6 +66,30 @@ pub fn verify_tee_receipt(
             }
         }
         _ => AttestationHashStatus::MissingFields,
+    };
+
+    // 2b. Verify quote and cross-check extracted fields against receipt claims.
+    // Cross-checks are mandatory when a quote is present — a quote that parses
+    // but binds different state than the receipt claims is a verification failure.
+    let attestation_status = match &tee_att.quote {
+        Some(quote_b64) => {
+            let b64 = base64::engine::general_purpose::STANDARD;
+            match b64.decode(quote_b64) {
+                Ok(quote_bytes) => match quote_verifier.verify_quote(&quote_bytes) {
+                    Ok(verified) => match cross_check_and_map(
+                        &verified,
+                        tee_att.user_data_hex.as_deref(),
+                        tee_att.measurement.as_deref(),
+                    ) {
+                        Ok(status) => status,
+                        Err(e) => AttestationStatus::QuoteInvalid(e),
+                    },
+                    Err(e) => AttestationStatus::QuoteInvalid(e),
+                },
+                Err(_) => AttestationStatus::QuoteInvalid(QuoteVerifyError::Base64DecodeFailed),
+            }
+        }
+        None => AttestationStatus::QuoteInvalid(QuoteVerifyError::MissingQuote),
     };
 
     // 3. Measurement allowlist (exact match)
@@ -115,7 +144,7 @@ pub fn verify_tee_receipt(
 
     Ok(TeeVerificationResult {
         measurement_match,
-        attestation_status: AttestationStatus::QuoteUnverified,
+        attestation_status,
         signature_status,
         attestation_hash_status,
         transcript_hash_valid,
