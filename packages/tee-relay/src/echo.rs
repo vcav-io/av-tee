@@ -82,7 +82,10 @@ pub async fn create_session(
         pubkey,
     );
 
-    state.sessions.insert(session_id.clone(), session);
+    state
+        .sessions
+        .insert(session_id.clone(), session)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(EchoCreateSessionResponse {
         session_id,
@@ -182,6 +185,7 @@ pub async fn submit_input(
             }
             Ok(both)
         })
+        .map_err(|_| reject())?
         .ok_or_else(reject)?
         .map_err(|_| reject())?;
 
@@ -202,7 +206,11 @@ pub async fn submit_input(
 }
 
 async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<EchoResponse, ()> {
-    let session = state.sessions.remove(session_id).ok_or(())?;
+    let session = state
+        .sessions
+        .remove(session_id)
+        .map_err(|_| ())?
+        .ok_or(())?;
 
     let initiator_input = session.initiator_input.as_ref().ok_or(())?;
     let responder_input = session.responder_input.as_ref().ok_or(())?;
