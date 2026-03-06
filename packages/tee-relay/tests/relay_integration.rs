@@ -706,6 +706,17 @@ async fn relay_failure_receipt_on_provider_error() {
     );
     // TEE attestation should still be populated on failure receipts
     assert!(receipt.tee_attestation.is_some());
+
+    // Schema hash must be a real canonicalized hash, NOT the sha256 of empty string
+    let empty_string_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert_ne!(
+        receipt.commitments.schema_hash, empty_string_hash,
+        "failure receipt schema_hash must not fall back to sha256(empty)"
+    );
+    // Verify it matches the canonical hash of the test contract's output_schema
+    let canonical = receipt_core::canonicalize_serializable(&test_contract().output_schema).unwrap();
+    let expected_hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+    assert_eq!(receipt.commitments.schema_hash, expected_hash);
 }
 
 #[tokio::test]

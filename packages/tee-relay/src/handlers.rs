@@ -258,18 +258,20 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
     };
 
     // Compute schema hash for failure receipt
-    let schema_hash = {
-        let canonical = receipt_core::canonicalize_serializable(&contract.output_schema);
-        match canonical {
-            Ok(c) => {
-                let mut h = Sha256::new();
-                h.update(c.as_bytes());
-                hex::encode(h.finalize())
-            }
-            Err(e) => {
-                tracing::error!(session_id = %session_id, "schema canonicalization failed for failure receipt: {e}"); // SAFETY: no plaintext
-                hex::encode(Sha256::digest(b""))
-            }
+    let schema_hash = match receipt_core::canonicalize_serializable(&contract.output_schema) {
+        Ok(c) => {
+            let mut h = Sha256::new();
+            h.update(c.as_bytes());
+            hex::encode(h.finalize())
+        }
+        Err(e) => {
+            tracing::error!(session_id = %session_id, "schema canonicalization failed: {e}"); // SAFETY: no plaintext
+            state.sessions.with_session(&session_id, |session| {
+                session.state = SessionState::Aborted;
+                session.abort_signal = Some("schema_canonicalization_failed".to_string());
+                session.clear_inputs();
+            });
+            return;
         }
     };
 
