@@ -7,6 +7,10 @@ use zeroize::Zeroizing;
 
 use tee_core::types::ParticipantRole;
 
+/// Error returned when the session store mutex has been poisoned.
+#[derive(Debug)]
+pub struct SessionStorePoisoned;
+
 /// Session lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -121,37 +125,37 @@ impl SessionStore {
         }
     }
 
-    /// Lock the session map, recovering from poison if a prior panic occurred.
-    fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
-        match self.sessions.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::error!("session store mutex was poisoned, recovering"); // SAFETY: no plaintext
-                poisoned.into_inner()
-            }
-        }
+    /// Lock the session map, returning an error if the mutex is poisoned.
+    fn lock_sessions(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<String, Session>>, SessionStorePoisoned> {
+        self.sessions.lock().map_err(|_| {
+            tracing::error!("session store mutex was poisoned, refusing to continue"); // SAFETY: no plaintext
+            SessionStorePoisoned
+        })
     }
 
-    pub fn insert(&self, id: String, session: Session) {
-        self.lock_sessions().insert(id, session);
+    pub fn insert(&self, id: String, session: Session) -> Result<(), SessionStorePoisoned> {
+        self.lock_sessions()?.insert(id, session);
+        Ok(())
     }
 
-    pub fn with_session<F, R>(&self, id: &str, f: F) -> Option<R>
+    pub fn with_session<F, R>(&self, id: &str, f: F) -> Result<Option<R>, SessionStorePoisoned>
     where
         F: FnOnce(&mut Session) -> R,
     {
-        let mut sessions = self.lock_sessions();
-        sessions.get_mut(id).map(f)
+        let mut sessions = self.lock_sessions()?;
+        Ok(sessions.get_mut(id).map(f))
     }
 
-    pub fn remove(&self, id: &str) -> Option<Session> {
-        self.lock_sessions().remove(id)
+    pub fn remove(&self, id: &str) -> Result<Option<Session>, SessionStorePoisoned> {
+        Ok(self.lock_sessions()?.remove(id))
     }
 
     /// Reap expired sessions. Returns number removed.
-    pub fn reap_expired(&self) -> usize {
+    pub fn reap_expired(&self) -> Result<usize, SessionStorePoisoned> {
         let now = std::time::Instant::now();
-        let mut sessions = self.lock_sessions();
+        let mut sessions = self.lock_sessions()?;
         let before = sessions.len();
         // Hard cap for Processing sessions (5 minutes) to prevent leaked sessions
         let processing_max = Duration::from_secs(300);
@@ -162,20 +166,109 @@ impl SessionStore {
                 _ => age < self.ttl,
             }
         });
-        before - sessions.len()
+        Ok(before - sessions.len())
     }
 }
 
 /// Start a reaper task for an Arc<SessionStore>.
+///
+/// If the session store mutex is poisoned, the reaper logs an error and
+/// exits the process. A service with a poisoned session store cannot safely
+/// process sessions — better to restart cleanly.
 pub fn start_session_reaper(store: std::sync::Arc<SessionStore>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let reaped = store.reap_expired();
-            if reaped > 0 {
-                tracing::info!(reaped, "session reaper: expired sessions removed"); // SAFETY: no plaintext
+            match store.reap_expired() {
+                Ok(reaped) => {
+                    if reaped > 0 {
+                        tracing::info!(reaped, "session reaper: expired sessions removed"); // SAFETY: no plaintext
+                    }
+                }
+                Err(_) => {
+                    tracing::error!("session reaper: session store poisoned, shutting down"); // SAFETY: no plaintext
+                    std::process::exit(1);
+                }
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn poisoned_mutex_returns_error() {
+        let store = Arc::new(SessionStore::default());
+
+        // Poison the mutex by panicking while holding the lock
+        let store_clone = store.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = store_clone.sessions.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        });
+        let _ = handle.join(); // join the panicked thread
+
+        // Now the mutex is poisoned — with_session should return Err
+        let result = store.with_session("any-id", |_| ());
+        assert!(
+            result.is_err(),
+            "with_session should return Err on poisoned mutex"
+        );
+
+        let result = store.insert("id".to_string(), make_dummy_session());
+        assert!(
+            result.is_err(),
+            "insert should return Err on poisoned mutex"
+        );
+
+        let result = store.remove("id");
+        assert!(
+            result.is_err(),
+            "remove should return Err on poisoned mutex"
+        );
+
+        let result = store.reap_expired();
+        assert!(
+            result.is_err(),
+            "reap_expired should return Err on poisoned mutex"
+        );
+    }
+
+    fn make_dummy_session() -> Session {
+        use x25519_dalek::StaticSecret;
+        use zeroize::Zeroizing;
+
+        let secret = Zeroizing::new(StaticSecret::random_from_rng(rand::thread_rng()));
+        let pubkey = x25519_dalek::PublicKey::from(&*secret);
+        Session::new(
+            [0u8; 16],
+            vec![0u8; 32],
+            "0".repeat(64),
+            vault_family_types::Contract {
+                purpose_code: vault_family_types::Purpose::Mediation,
+                output_schema_id: "test".to_string(),
+                output_schema: serde_json::json!({}),
+                participants: vec![],
+                prompt_template_hash: "a".repeat(64),
+                entropy_budget_bits: None,
+                timing_class: None,
+                metadata: serde_json::Value::Null,
+                model_profile_id: None,
+                enforcement_policy_hash: None,
+                output_schema_hash: None,
+                model_constraints: None,
+                max_completion_tokens: None,
+                session_ttl_secs: None,
+                invite_ttl_secs: None,
+                entropy_enforcement: None,
+                relay_verifying_key_hex: None,
+            },
+            secret,
+            pubkey,
+        )
+    }
 }

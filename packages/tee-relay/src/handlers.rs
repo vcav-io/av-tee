@@ -68,7 +68,10 @@ pub async fn create_session(
         pubkey,
     );
 
-    state.sessions.insert(session_id.clone(), session);
+    state
+        .sessions
+        .insert(session_id.clone(), session)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(CreateSessionResponse {
         session_id,
@@ -175,6 +178,7 @@ pub async fn submit_input(
             }
             Ok(both)
         })
+        .map_err(|_| reject())?
         .ok_or_else(reject)?
         .map_err(|_| reject())?;
 
@@ -200,7 +204,7 @@ pub async fn submit_input(
     tokio::spawn(async move {
         if let Err(e) = handle.await {
             tracing::error!(session_id = %session_id_watch, "inference task panicked: {e}"); // SAFETY: no plaintext
-            state_watch
+            let _ = state_watch
                 .sessions
                 .with_session(&session_id_watch, |session| {
                     session.state = SessionState::Aborted;
@@ -222,7 +226,7 @@ pub async fn submit_input(
 /// Run inference in the background. Updates session state on completion.
 async fn run_inference(state: Arc<RelayState>, session_id: String) {
     // Extract inputs from session (take ownership)
-    let session_data = state.sessions.with_session(&session_id, |session| {
+    let session_data = match state.sessions.with_session(&session_id, |session| {
         let initiator = session.initiator_input.take();
         let responder = session.responder_input.take();
         let contract = session.contract.take();
@@ -237,7 +241,13 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
             init_ct_hash,
             resp_ct_hash,
         )
-    });
+    }) {
+        Ok(data) => data,
+        Err(_) => {
+            tracing::error!(session_id = %session_id, "session store poisoned during inference"); // SAFETY: no plaintext
+            return;
+        }
+    };
 
     let Some((
         Some(initiator_input),
@@ -249,7 +259,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
     )) = session_data
     else {
         // Missing data — abort
-        state.sessions.with_session(&session_id, |session| {
+        let _ = state.sessions.with_session(&session_id, |session| {
             session.state = SessionState::Aborted;
             session.abort_signal = Some("missing_session_data".to_string());
             session.clear_inputs();
@@ -266,7 +276,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
         }
         Err(e) => {
             tracing::error!(session_id = %session_id, "schema canonicalization failed: {e}"); // SAFETY: no plaintext
-            state.sessions.with_session(&session_id, |session| {
+            let _ = state.sessions.with_session(&session_id, |session| {
                 session.state = SessionState::Aborted;
                 session.abort_signal = Some("schema_canonicalization_failed".to_string());
                 session.clear_inputs();
@@ -289,7 +299,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
 
     match result {
         Ok(relay_result) => {
-            state.sessions.with_session(&session_id, |session| {
+            let _ = state.sessions.with_session(&session_id, |session| {
                 session.state = SessionState::Completed;
                 session.output = Some(relay_result.output);
                 session.receipt_v2 = Some(relay_result.receipt_v2);
@@ -311,7 +321,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
             )
             .await;
 
-            state.sessions.with_session(&session_id, |session| {
+            let _ = state.sessions.with_session(&session_id, |session| {
                 session.state = SessionState::Aborted;
                 session.abort_signal = Some(e.kind().to_string());
                 session.receipt_v2 = match failure_receipt {
@@ -340,6 +350,7 @@ pub async fn session_status(
                 abort_signal: session.abort_signal.clone(),
             })
         })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)
 }
 
@@ -357,5 +368,6 @@ pub async fn session_output(
                 receipt_v2: session.receipt_v2.clone(),
             })
         })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)
 }
