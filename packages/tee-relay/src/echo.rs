@@ -201,19 +201,41 @@ pub async fn submit_input(
 
     let echo = build_echo_response(&state, &session_id)
         .await
-        .map_err(|_| reject())?;
+        .map_err(|e| {
+            tracing::warn!(session_id = %session_id, error = ?e, "echo response failed");
+            reject()
+        })?;
     Ok((StatusCode::OK, Json(echo)).into_response())
 }
 
-async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<EchoResponse, ()> {
+#[derive(Debug)]
+#[allow(dead_code)] // Fields are read via Debug formatting in tracing output
+enum EchoError {
+    SessionStorePoisoned,
+    SessionNotFound,
+    MissingInput(&'static str),
+    MissingSubmissionHash(&'static str),
+    AttestationFailed(String),
+}
+
+async fn build_echo_response(
+    state: &EchoState,
+    session_id: &str,
+) -> Result<EchoResponse, EchoError> {
     let session = state
         .sessions
         .remove(session_id)
-        .map_err(|_| ())?
-        .ok_or(())?;
+        .map_err(|_| EchoError::SessionStorePoisoned)?
+        .ok_or(EchoError::SessionNotFound)?;
 
-    let initiator_input = session.initiator_input.as_ref().ok_or(())?;
-    let responder_input = session.responder_input.as_ref().ok_or(())?;
+    let initiator_input = session
+        .initiator_input
+        .as_ref()
+        .ok_or(EchoError::MissingInput("initiator"))?;
+    let responder_input = session
+        .responder_input
+        .as_ref()
+        .ok_or(EchoError::MissingInput("responder"))?;
 
     let initiator_hash = {
         let mut h = Sha256::new();
@@ -226,8 +248,14 @@ async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<Echo
         hex::encode(h.finalize())
     };
 
-    let initiator_sub_hash = session.initiator_ciphertext_hash.as_ref().ok_or(())?;
-    let responder_sub_hash = session.responder_ciphertext_hash.as_ref().ok_or(())?;
+    let initiator_sub_hash = session
+        .initiator_ciphertext_hash
+        .as_ref()
+        .ok_or(EchoError::MissingSubmissionHash("initiator"))?;
+    let responder_sub_hash = session
+        .responder_ciphertext_hash
+        .as_ref()
+        .ok_or(EchoError::MissingSubmissionHash("responder"))?;
 
     let output_hash = {
         let mut h = Sha256::new();
@@ -252,7 +280,7 @@ async fn build_echo_response(state: &EchoState, session_id: &str) -> Result<Echo
         .cvm
         .get_attestation(&transcript_hash)
         .await
-        .map_err(|_| ())?;
+        .map_err(|e| EchoError::AttestationFailed(format!("{e}")))?;
 
     let attestation_hash = {
         let mut h = Sha256::new();
