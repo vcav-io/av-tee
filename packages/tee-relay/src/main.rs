@@ -108,6 +108,10 @@ async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_key: ed25519_dalek::Sign
     warn!("Phase 1: attestable receipts but no client-side verification tooling yet."); // SAFETY: no plaintext
 
     let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+    if anthropic_api_key.is_none() {
+        tracing::error!("ANTHROPIC_API_KEY is required in relay mode");
+        std::process::exit(1);
+    }
     let anthropic_model_id =
         std::env::var("AV_MODEL_ID").unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
     let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
