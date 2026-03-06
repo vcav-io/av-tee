@@ -2,9 +2,8 @@ use crate::MeasurementEntry;
 use crate::quote::QuoteVerifyError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AttestationStatus {
-    /// No quote verification was attempted.
-    QuoteUnverified,
     /// Quote parsed and fields extracted, but platform signature not checked.
     /// The extracted fields were cross-checked against receipt claims.
     QuoteParsed,

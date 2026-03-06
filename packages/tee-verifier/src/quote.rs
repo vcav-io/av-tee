@@ -4,6 +4,7 @@ use crate::result::AttestationStatus;
 
 /// Typed errors for quote verification failures.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum QuoteVerifyError {
     #[error("no quote field in tee_attestation")]
     MissingQuote,
