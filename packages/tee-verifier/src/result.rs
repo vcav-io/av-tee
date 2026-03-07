@@ -44,13 +44,31 @@ pub enum AttestationHashStatus {
 }
 
 /// Which field the transcript hash was verified against.
+///
+/// The binding level determines the assurance that the transcript (the ordered
+/// set of commitments) was produced inside a genuine CVM:
+///
+/// | Variant | Assurance | What it means |
+/// |---------|-----------|---------------|
+/// | `UserData` | **Hardware-bound** | Transcript hash is in the SEV-SNP `user_data` field, which is included in the platform attestation report. A valid quote proves the hash was set by code running inside the measured CVM. |
+/// | `TranscriptHashFallback` | **Relay-asserted** | Transcript hash matches `transcript_hash_hex` in `tee_attestation`, but that field is set by the relay, not bound into the platform attestation. A compromised relay could substitute a different hash. |
+/// | `None` | **Unverifiable** | Neither `user_data_hex` nor `transcript_hash_hex` is present. The transcript cannot be verified against anything. |
+///
+/// Callers that check only `transcript_hash_valid == true` should also inspect
+/// `transcript_binding` — a valid hash with `TranscriptHashFallback` binding
+/// provides weaker assurance than one with `UserData` binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptBinding {
-    /// Verified against platform `user_data_hex` (attestation-bound).
+    /// Transcript hash verified against the platform attestation `user_data`
+    /// field. This is the strongest binding: the hash was committed by code
+    /// running inside a measured CVM and is covered by the SEV-SNP signature.
     UserData,
-    /// Fell back to relay-asserted `transcript_hash_hex`.
+    /// Transcript hash verified against the relay-asserted `transcript_hash_hex`
+    /// field. The hash itself is correct, but it is not bound into the platform
+    /// attestation — a compromised relay could have substituted it.
     TranscriptHashFallback,
-    /// Neither field present.
+    /// Neither `user_data_hex` nor `transcript_hash_hex` was present in the
+    /// attestation. Transcript integrity cannot be verified.
     None,
 }
 
@@ -63,7 +81,7 @@ impl TeeVerificationResult {
 
     /// Returns `true` when all checks pass and the quote has been at minimum
     /// parsed and cross-checked against receipt claims. Accepts both
-    /// `QuoteParsed` and `QuoteVerified`. Use [`is_valid`] when full
+    /// `QuoteParsed` and `QuoteVerified`. Use [`Self::is_valid`] when full
     /// cryptographic chain verification is required.
     pub fn is_valid_parsed(&self) -> bool {
         matches!(
