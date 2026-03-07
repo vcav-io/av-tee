@@ -1,0 +1,24 @@
+[package]
+name = "tee-snp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes-gcm = "0.10"
+async-trait = "0.1"
+hex = "0.4"
+rand = "0.8"
+sev = { version = "7", default-features = false, features = ["snp"] }
+sha2 = "0.10"
+tee-core = { path = "../tee-core" }
+thiserror = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tee-verifier = { path = "../tee-verifier" }
+
+[features]
+default = []
+snp-live = []
