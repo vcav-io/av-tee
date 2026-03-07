@@ -5,11 +5,27 @@ use axum::Router;
 use axum::routing::{get, post};
 use tracing::warn;
 
-use tee_core::SimulatedCvm;
 use tee_core::attestation::CvmRuntime;
 use tee_relay::handlers::{self, RelayState};
 use tee_relay::relay::AppState;
 use tee_relay::session::{SessionStore, start_session_reaper};
+
+fn build_cvm_runtime() -> Result<Arc<dyn CvmRuntime>, Box<dyn std::error::Error>> {
+    #[cfg(feature = "snp")]
+    {
+        match tee_snp::SevSnpCvm::new() {
+            Ok(cvm) => {
+                tracing::info!("SEV-SNP CVM runtime initialized");
+                return Ok(Arc::new(cvm));
+            }
+            Err(e) => {
+                tracing::warn!("SEV-SNP unavailable ({e}), falling back to simulated");
+            }
+        }
+    }
+    tracing::info!("Using simulated CVM runtime");
+    Ok(Arc::new(tee_core::SimulatedCvm::new()))
+}
 
 #[tokio::main]
 async fn main() {
@@ -33,7 +49,7 @@ async fn main() {
         .unwrap_or(false);
 
     // CVM no longer depends on signing key — construct it once
-    let cvm = Arc::new(SimulatedCvm::new());
+    let cvm = build_cvm_runtime().expect("failed to initialize CVM runtime");
 
     // Resolve signing key: env var override (dev only, blocked in real TEE) or seal/unseal lifecycle
     let signing_key = if cvm.is_real_tee() {
@@ -79,7 +95,7 @@ async fn main() {
     }
 }
 
-async fn run_echo_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: &str) {
+async fn run_echo_mode(cvm: Arc<dyn CvmRuntime>, signing_pubkey_hex: &str) {
     use tee_relay::echo::{self, EchoState};
 
     warn!("ECHO MODE — NOT FOR PRODUCTION. Binds to 127.0.0.1 only."); // SAFETY: no plaintext
@@ -103,7 +119,7 @@ async fn run_echo_mode(cvm: Arc<SimulatedCvm>, signing_pubkey_hex: &str) {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn run_relay_mode(cvm: Arc<SimulatedCvm>, signing_key: ed25519_dalek::SigningKey) {
+async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::SigningKey) {
     warn!("TEE RELAY MODE — SimulatedCvm (not production-secure)."); // SAFETY: no plaintext
     warn!("Phase 1: attestable receipts but no client-side verification tooling yet."); // SAFETY: no plaintext
 
