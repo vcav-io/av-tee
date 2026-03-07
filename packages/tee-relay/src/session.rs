@@ -170,7 +170,7 @@ impl SessionStore {
     }
 }
 
-/// Start a reaper task for an Arc<SessionStore>.
+/// Start a reaper task for an `Arc<SessionStore>`.
 ///
 /// If the session store mutex is poisoned, the reaper logs an error and
 /// exits the process. A service with a poisoned session store cannot safely
