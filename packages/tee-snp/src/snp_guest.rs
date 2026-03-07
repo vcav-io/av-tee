@@ -72,9 +72,9 @@ pub(crate) fn parse_report_bytes(report_bytes: &[u8]) -> Result<ParsedReport, Cv
             .try_into()
             .expect("4-byte slice"),
     );
-    if version != 2 {
+    if version < 2 {
         return Err(CvmError::AttestationUnavailable(format!(
-            "unsupported report version {version}, expected 2"
+            "unsupported report version {version}, expected >= 2"
         )));
     }
 
@@ -110,7 +110,7 @@ pub(crate) fn derive_seal_key(fw: &mut Firmware) -> Result<Zeroizing<[u8; 32]>, 
     );
 
     let key = fw
-        .get_derived_key(None, request)
+        .get_derived_key(Some(1), request)
         .map_err(|e| CvmError::SealError(format!("SNP_GET_DERIVED_KEY failed: {e}")))?;
 
     Ok(Zeroizing::new(key))
@@ -136,9 +136,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_report_rejects_wrong_version() {
+    fn parse_report_rejects_old_version() {
         let mut report = vec![0u8; 1184];
-        report[0..4].copy_from_slice(&99u32.to_le_bytes());
+        report[0..4].copy_from_slice(&1u32.to_le_bytes());
         assert!(parse_report_bytes(&report).is_err());
     }
 
