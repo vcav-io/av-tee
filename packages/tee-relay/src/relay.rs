@@ -14,6 +14,9 @@ use crate::error::RelayError;
 use crate::provider::ProviderRequest;
 use crate::provider::anthropic::AnthropicProvider;
 
+pub const INLINE_PROMPT_TEMPLATE_HASH: &str =
+    "592ce8974206a5744aefacfdc5530dbe6972f43e20794714a00d3425fb7f54d1";
+
 /// Shared application state for the TEE relay.
 pub struct AppState {
     pub cvm: std::sync::Arc<dyn CvmRuntime>,
@@ -87,6 +90,57 @@ fn canonical_sha256(value: &impl serde::Serialize) -> Result<String, RelayError>
     Ok(hex::encode(hasher.finalize()))
 }
 
+// Returns the canonical inline schema hash so validation and receipt binding
+// share the same preflight result.
+fn validate_contract_support(
+    contract: &vault_family_types::Contract,
+    state: &AppState,
+) -> Result<String, RelayError> {
+    if contract.participants.len() != 2 {
+        return Err(RelayError::ContractValidation(
+            "contract must have exactly 2 participants".to_string(),
+        ));
+    }
+
+    if contract.prompt_template_hash != INLINE_PROMPT_TEMPLATE_HASH {
+        return Err(RelayError::ContractValidation(
+            "prompt_template_hash is not supported by tee-relay".to_string(),
+        ));
+    }
+
+    if let Some(expected_key) = contract.relay_verifying_key_hex.as_deref() {
+        let actual_key = receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
+        if expected_key != actual_key {
+            return Err(RelayError::ContractValidation(
+                "relay_verifying_key_hex does not match tee-relay signing key".to_string(),
+            ));
+        }
+    }
+
+    if contract.model_profile_id.is_some() {
+        return Err(RelayError::ContractValidation(
+            "model_profile_id is not supported by tee-relay".to_string(),
+        ));
+    }
+
+    if contract.model_constraints.is_some() {
+        return Err(RelayError::ContractValidation(
+            "model_constraints are not supported by tee-relay".to_string(),
+        ));
+    }
+
+    let inline_schema_hash = canonical_sha256(&contract.output_schema)?;
+    if let Some(expected_schema_hash) = contract.output_schema_hash.as_deref() {
+        if expected_schema_hash != inline_schema_hash {
+            return Err(RelayError::ContractValidation(
+                "output_schema_hash does not match inline output_schema".to_string(),
+            ));
+        }
+    }
+
+    Ok(inline_schema_hash)
+}
+
 /// Core TEE relay logic: validate → assemble → call provider → validate output → build receipt.
 ///
 /// This runs entirely inside the CVM. Decrypted inputs arrive as `Zeroizing<Vec<u8>>`
@@ -104,11 +158,7 @@ pub async fn relay_core(
     state: &AppState,
 ) -> Result<RelayResult, RelayError> {
     // 1. Validate contract
-    if contract.participants.len() != 2 {
-        return Err(RelayError::ContractValidation(
-            "contract must have exactly 2 participants".to_string(),
-        ));
-    }
+    let schema_hash = validate_contract_support(contract, state)?;
 
     // 2. Parse decrypted inputs
     let input_a: DecryptedInput = serde_json::from_slice(initiator_plaintext.as_slice())
@@ -181,9 +231,7 @@ pub async fn relay_core(
 
     // 6. Compute prompt template hash (inline prompt program for now)
     let prompt_template_hash = {
-        let mut hasher = Sha256::new();
-        hasher.update(b"av-tee-inline-prompt-v1");
-        hex::encode(hasher.finalize())
+        INLINE_PROMPT_TEMPLATE_HASH.to_string()
     };
 
     // 7. Resolve effective max_tokens
@@ -223,8 +271,6 @@ pub async fn relay_core(
 
     // 10. Build TEE receipt
     let output_hash = canonical_sha256(&output)?;
-    let schema_hash = canonical_sha256(&contract.output_schema)?;
-
     let receipt_v2 = build_tee_receipt_v2(
         session_id,
         contract_hash_hex,
@@ -244,6 +290,19 @@ pub async fn relay_core(
     .await?;
 
     Ok(RelayResult { output, receipt_v2 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::INLINE_PROMPT_TEMPLATE_HASH;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn inline_prompt_template_hash_constant_matches_v1_program_id() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"av-tee-inline-prompt-v1");
+        assert_eq!(INLINE_PROMPT_TEMPLATE_HASH, hex::encode(hasher.finalize()));
+    }
 }
 
 /// Build and sign a TEE-mode v2 receipt with attestation binding.
