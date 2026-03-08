@@ -75,7 +75,7 @@ fn test_contract() -> vault_family_types::Contract {
             "additionalProperties": false
         }),
         participants: vec!["alice".to_string(), "bob".to_string()],
-        prompt_template_hash: "a".repeat(64),
+        prompt_template_hash: tee_relay::relay::INLINE_PROMPT_TEMPLATE_HASH.to_string(),
         entropy_budget_bits: None,
         timing_class: None,
         metadata: serde_json::Value::Null,
@@ -89,6 +89,22 @@ fn test_contract() -> vault_family_types::Contract {
         entropy_enforcement: None,
         relay_verifying_key_hex: None,
     }
+}
+
+async fn create_session(
+    client: &reqwest::Client,
+    base: &str,
+    contract: vault_family_types::Contract,
+) -> CreateSessionResponse {
+    client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest { contract })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
 }
 
 fn test_relay_state(mock_url: &str) -> Arc<RelayState> {
@@ -128,6 +144,53 @@ async fn start_relay_server(mock_url: &str) -> String {
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}")
+}
+
+async fn submit_both_inputs_and_wait_for_abort(
+    client: &reqwest::Client,
+    base: &str,
+    session: &CreateSessionResponse,
+) -> SessionOutputResponse {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tee_pubkey_bytes: [u8; 32] = b64
+        .decode(&session.tee_session_pubkey)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let init_input = serde_json::json!({"role": "alice", "context": {}});
+    let init_req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Initiator,
+        serde_json::to_vec(&init_input).unwrap().as_slice(),
+    );
+    client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
+        .json(&init_req)
+        .send()
+        .await
+        .unwrap();
+
+    let resp_input = serde_json::json!({"role": "bob", "context": {}});
+    let resp_req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Responder,
+        serde_json::to_vec(&resp_input).unwrap().as_slice(),
+    );
+    client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.responder_submit_token)
+        .json(&resp_req)
+        .send()
+        .await
+        .unwrap();
+
+    poll_until_done(client, base, &session.session_id, &session.read_token).await
 }
 
 fn encrypt_input(
@@ -1025,4 +1088,80 @@ async fn relay_plaintext_role_label_mismatch_aborts_session() {
         .await
         .unwrap();
     assert_eq!(status.abort_signal.as_deref(), Some("contract_validation"));
+}
+
+#[tokio::test]
+async fn relay_rejects_mismatched_relay_verifying_key() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.relay_verifying_key_hex = Some("f".repeat(64));
+    let session = create_session(&client, &base, contract).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    let receipt = output.receipt_v2.expect("failure receipt");
+    assert_eq!(receipt.claims.status, Some(receipt_core::SessionStatus::Error));
+}
+
+#[tokio::test]
+async fn relay_rejects_unsupported_model_profile_id() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.model_profile_id = Some("profile-1".to_string());
+    let session = create_session(&client, &base, contract).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+}
+
+#[tokio::test]
+async fn relay_rejects_unsupported_model_constraints() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.model_constraints = Some(vault_family_types::ModelConstraints {
+        allowed_providers: vec!["anthropic".to_string()],
+        allowed_models: vec![],
+        min_tier: None,
+    });
+    let session = create_session(&client, &base, contract).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+}
+
+#[tokio::test]
+async fn relay_rejects_mismatched_output_schema_hash() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.output_schema_hash = Some("f".repeat(64));
+    let session = create_session(&client, &base, contract).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+}
+
+#[tokio::test]
+async fn relay_rejects_unsupported_prompt_template_hash() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.prompt_template_hash = "a".repeat(64);
+    let session = create_session(&client, &base, contract).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
 }
