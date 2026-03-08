@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
@@ -82,9 +83,17 @@ impl Session {
     }
 
     pub fn submit_role_for_token(&self, token: &str) -> Option<ParticipantRole> {
-        if token == self.initiator_submit_token {
+        if token
+            .as_bytes()
+            .ct_eq(self.initiator_submit_token.as_bytes())
+            .into()
+        {
             Some(ParticipantRole::Initiator)
-        } else if token == self.responder_submit_token {
+        } else if token
+            .as_bytes()
+            .ct_eq(self.responder_submit_token.as_bytes())
+            .into()
+        {
             Some(ParticipantRole::Responder)
         } else {
             None
@@ -92,7 +101,7 @@ impl Session {
     }
 
     pub fn read_token_matches(&self, token: &str) -> bool {
-        token == self.read_token
+        token.as_bytes().ct_eq(self.read_token.as_bytes()).into()
     }
 
     /// Returns true if this role has already submitted.

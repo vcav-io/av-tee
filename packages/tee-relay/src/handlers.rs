@@ -6,6 +6,8 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use rand::RngCore;
+use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -31,7 +33,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 
 fn random_token() -> String {
     let mut bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
