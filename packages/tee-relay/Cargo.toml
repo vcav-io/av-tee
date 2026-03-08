@@ -26,6 +26,7 @@ sha2 = "0.10"
 rand = "0.8"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
+subtle = "2"
 
 # Serialization
 base64 = "0.22"

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
@@ -39,6 +40,9 @@ pub struct Session {
     pub receipt_v2: Option<receipt_core::ReceiptV2>,
     pub abort_signal: Option<String>,
     pub created_at: std::time::Instant,
+    pub initiator_submit_token: String,
+    pub responder_submit_token: String,
+    pub read_token: String,
     /// Tracks which roles have submitted (for duplicate detection).
     submitted: [bool; 2],
 }
@@ -51,6 +55,9 @@ impl Session {
         contract: vault_family_types::Contract,
         tee_session_secret: Zeroizing<StaticSecret>,
         tee_session_pubkey: PublicKey,
+        initiator_submit_token: String,
+        responder_submit_token: String,
+        read_token: String,
     ) -> Self {
         Self {
             session_id_bytes,
@@ -68,8 +75,33 @@ impl Session {
             receipt_v2: None,
             abort_signal: None,
             created_at: std::time::Instant::now(),
+            initiator_submit_token,
+            responder_submit_token,
+            read_token,
             submitted: [false; 2],
         }
+    }
+
+    pub fn submit_role_for_token(&self, token: &str) -> Option<ParticipantRole> {
+        if token
+            .as_bytes()
+            .ct_eq(self.initiator_submit_token.as_bytes())
+            .into()
+        {
+            Some(ParticipantRole::Initiator)
+        } else if token
+            .as_bytes()
+            .ct_eq(self.responder_submit_token.as_bytes())
+            .into()
+        {
+            Some(ParticipantRole::Responder)
+        } else {
+            None
+        }
+    }
+
+    pub fn read_token_matches(&self, token: &str) -> bool {
+        token.as_bytes().ct_eq(self.read_token.as_bytes()).into()
     }
 
     /// Returns true if this role has already submitted.
@@ -269,6 +301,9 @@ mod tests {
             },
             secret,
             pubkey,
+            "init-token".to_string(),
+            "resp-token".to_string(),
+            "read-token".to_string(),
         )
     }
 }

@@ -222,6 +222,7 @@ async fn full_relay_roundtrip_with_receipt() {
 
     let resp = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
         .json(&init_req)
         .send()
         .await
@@ -243,6 +244,7 @@ async fn full_relay_roundtrip_with_receipt() {
 
     let resp = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.responder_submit_token)
         .json(&resp_req)
         .send()
         .await
@@ -255,6 +257,7 @@ async fn full_relay_roundtrip_with_receipt() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let status: SessionStatusResponse = client
             .get(format!("{base}/sessions/{}/status", session.session_id))
+            .bearer_auth(&session.read_token)
             .send()
             .await
             .unwrap()
@@ -275,6 +278,7 @@ async fn full_relay_roundtrip_with_receipt() {
     // 6. GET /sessions/:id/output
     let output: SessionOutputResponse = client
         .get(format!("{base}/sessions/{}/output", session.session_id))
+        .bearer_auth(&session.read_token)
         .send()
         .await
         .unwrap()
@@ -338,6 +342,7 @@ async fn relay_session_status_not_found() {
 
     let resp = client
         .get(format!("{base}/sessions/nonexistent/status"))
+        .bearer_auth("read-token")
         .send()
         .await
         .unwrap();
@@ -381,6 +386,7 @@ async fn relay_duplicate_submission_rejected() {
     // First submission
     let resp = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
         .json(&req1)
         .send()
         .await
@@ -397,6 +403,7 @@ async fn relay_duplicate_submission_rejected() {
     );
     let resp2 = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
         .json(&req2)
         .send()
         .await
@@ -473,12 +480,14 @@ async fn poll_until_done(
     client: &reqwest::Client,
     base: &str,
     session_id: &str,
+    read_token: &str,
 ) -> SessionOutputResponse {
     let mut attempts = 0;
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let status: SessionStatusResponse = client
             .get(format!("{base}/sessions/{session_id}/status"))
+            .bearer_auth(read_token)
             .send()
             .await
             .unwrap()
@@ -497,6 +506,7 @@ async fn poll_until_done(
 
     client
         .get(format!("{base}/sessions/{session_id}/output"))
+        .bearer_auth(read_token)
         .send()
         .await
         .unwrap()
@@ -550,6 +560,7 @@ async fn relay_transcript_hash_matches_recomputed() {
     );
     client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
         .json(&init_req)
         .send()
         .await
@@ -565,12 +576,13 @@ async fn relay_transcript_hash_matches_recomputed() {
     );
     client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.responder_submit_token)
         .json(&resp_req)
         .send()
         .await
         .unwrap();
 
-    let output = poll_until_done(&client, &base, &session.session_id).await;
+    let output = poll_until_done(&client, &base, &session.session_id, &session.read_token).await;
     assert_eq!(output.state, tee_relay::session::SessionState::Completed);
 
     let receipt = output.receipt_v2.expect("receipt_v2");
@@ -671,6 +683,7 @@ async fn relay_failure_receipt_on_provider_error() {
     );
     client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
         .json(&init_req)
         .send()
         .await
@@ -686,12 +699,13 @@ async fn relay_failure_receipt_on_provider_error() {
     );
     client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.responder_submit_token)
         .json(&resp_req)
         .send()
         .await
         .unwrap();
 
-    let output = poll_until_done(&client, &base, &session.session_id).await;
+    let output = poll_until_done(&client, &base, &session.session_id, &session.read_token).await;
     assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
     assert!(output.output.is_none());
 
@@ -762,6 +776,7 @@ async fn relay_aad_mismatch_rejected() {
 
     let resp = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
         .json(&req)
         .send()
         .await
@@ -830,6 +845,7 @@ async fn relay_role_swap_rejected() {
 
     let resp = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.responder_submit_token)
         .json(&req)
         .send()
         .await
@@ -873,6 +889,7 @@ async fn relay_receipt_session_id_matches() {
     );
     client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
         .json(&init_req)
         .send()
         .await
@@ -888,14 +905,124 @@ async fn relay_receipt_session_id_matches() {
     );
     client
         .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.responder_submit_token)
         .json(&resp_req)
         .send()
         .await
         .unwrap();
 
-    let output = poll_until_done(&client, &base, &session.session_id).await;
+    let output = poll_until_done(&client, &base, &session.session_id, &session.read_token).await;
     let receipt = output.receipt_v2.expect("receipt_v2");
 
     // Receipt session_id must match the actual session
     assert_eq!(receipt.session_id, session.session_id);
+}
+
+#[tokio::test]
+async fn relay_status_and_output_require_read_token() {
+    let mock_url = start_mock_provider("{}").await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let session: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let status_resp = client
+        .get(format!("{base}/sessions/{}/status", session.session_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), 401);
+
+    let output_resp = client
+        .get(format!("{base}/sessions/{}/output", session.session_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(output_resp.status(), 401);
+}
+
+#[tokio::test]
+async fn relay_plaintext_role_label_mismatch_aborts_session() {
+    let mock_url = start_mock_provider(r#"{"decision":"PROCEED"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let session: CreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: test_contract(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tee_pubkey_bytes: [u8; 32] = b64
+        .decode(&session.tee_session_pubkey)
+        .unwrap()
+        .try_into()
+        .unwrap();
+
+    let mislabeled_init_input = serde_json::json!({"role": "bob", "context": {}});
+    let init_req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Initiator,
+        serde_json::to_vec(&mislabeled_init_input).unwrap().as_slice(),
+    );
+    let init_resp = client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.initiator_submit_token)
+        .json(&init_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(init_resp.status(), 202);
+
+    let resp_input = serde_json::json!({"role": "bob", "context": {}});
+    let resp_req = encrypt_input(
+        &tee_pubkey_bytes,
+        &session.session_id,
+        &session.contract_hash,
+        ParticipantRole::Responder,
+        serde_json::to_vec(&resp_input).unwrap().as_slice(),
+    );
+    let resp_resp = client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .bearer_auth(&session.responder_submit_token)
+        .json(&resp_req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_resp.status(), 202);
+
+    let output = poll_until_done(&client, &base, &session.session_id, &session.read_token).await;
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    let receipt = output.receipt_v2.expect("failure receipt");
+    assert_eq!(receipt.claims.status, Some(receipt_core::SessionStatus::Error));
+
+    let status: SessionStatusResponse = client
+        .get(format!("{base}/sessions/{}/status", session.session_id))
+        .bearer_auth(&session.read_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status.abort_signal.as_deref(), Some("contract_validation"));
 }

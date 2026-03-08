@@ -43,6 +43,9 @@ pub struct CreateSessionResponse {
     /// Per-session X25519 public key (base64). Clients use this for ECDH.
     pub tee_session_pubkey: String,
     pub contract_hash: String,
+    pub initiator_submit_token: String,
+    pub responder_submit_token: String,
+    pub read_token: String,
 }
 
 /// Request body for POST /sessions/:id/input.

@@ -80,6 +80,9 @@ pub async fn create_session(
         dummy_contract,
         secret,
         pubkey,
+        "echo-init-token".to_string(),
+        "echo-resp-token".to_string(),
+        "echo-read-token".to_string(),
     );
 
     state

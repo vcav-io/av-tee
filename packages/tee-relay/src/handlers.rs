@@ -2,8 +2,12 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::header::AUTHORIZATION;
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use rand::RngCore;
+use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -18,6 +22,19 @@ use crate::types::*;
 pub struct RelayState {
     pub app: AppState,
     pub sessions: std::sync::Arc<SessionStore>,
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+fn random_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 /// GET /tee/info — return enclave identity + signing pubkey.
@@ -59,6 +76,10 @@ pub async fn create_session(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    let initiator_submit_token = random_token();
+    let responder_submit_token = random_token();
+    let read_token = random_token();
+
     let session = Session::new(
         session_id_bytes,
         contract_hash_bytes,
@@ -66,6 +87,9 @@ pub async fn create_session(
         req.contract,
         secret,
         pubkey,
+        initiator_submit_token.clone(),
+        responder_submit_token.clone(),
+        read_token.clone(),
     );
 
     state
@@ -80,6 +104,9 @@ pub async fn create_session(
             pubkey.as_bytes(),
         ),
         contract_hash: contract_hash_hex,
+        initiator_submit_token,
+        responder_submit_token,
+        read_token,
     }))
 }
 
@@ -89,6 +116,7 @@ pub async fn create_session(
 /// to prevent side-channel leaks.
 pub async fn submit_input(
     State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(req): Json<SubmitInputRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<InputErrorResponse>)> {
@@ -99,11 +127,7 @@ pub async fn submit_input(
         )
     };
 
-    let role = match req.role.as_str() {
-        "initiator" => ParticipantRole::Initiator,
-        "responder" => ParticipantRole::Responder,
-        _ => return Err(reject()),
-    };
+    let presented_token = bearer_token(&headers).ok_or_else(reject)?;
 
     // Decode base64 fields
     let client_pubkey_bytes: [u8; 32] = base64::Engine::decode(
@@ -135,6 +159,14 @@ pub async fn submit_input(
     let both_ready = state
         .sessions
         .with_session(&session_id, |session| {
+            let role = session.submit_role_for_token(presented_token).ok_or(())?;
+            let expected_role = match role {
+                ParticipantRole::Initiator => "initiator",
+                ParticipantRole::Responder => "responder",
+            };
+            if req.role != expected_role {
+                return Err(());
+            }
             if session.has_submitted(role) {
                 return Err(());
             }
@@ -340,34 +372,44 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
 /// GET /sessions/:id/status — poll session state.
 pub async fn session_status(
     State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionStatusResponse>, StatusCode> {
+    let presented_token = bearer_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     state
         .sessions
         .with_session(&session_id, |session| {
-            Json(SessionStatusResponse {
+            if !session.read_token_matches(presented_token) {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            Ok(Json(SessionStatusResponse {
                 state: session.state,
                 abort_signal: session.abort_signal.clone(),
-            })
+            }))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?
 }
 
 /// GET /sessions/:id/output — retrieve result + receipt.
 pub async fn session_output(
     State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionOutputResponse>, StatusCode> {
+    let presented_token = bearer_token(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     state
         .sessions
         .with_session(&session_id, |session| {
-            Json(SessionOutputResponse {
+            if !session.read_token_matches(presented_token) {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            Ok(Json(SessionOutputResponse {
                 state: session.state,
                 output: session.output.clone(),
                 receipt_v2: session.receipt_v2.clone(),
-            })
+            }))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?
 }
