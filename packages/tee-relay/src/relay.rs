@@ -463,14 +463,16 @@ pub async fn build_failure_receipt_v2(
     let receipt_signing_pubkey_hex =
         receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
 
-    // For failure receipts, use empty-string hash for missing fields
+    // Transcript binding must reflect the fields actually emitted in the
+    // receipt. Optional commitment fields omitted on the wire bind as "".
+    let missing_field = "";
     let empty_hash = hex::encode(Sha256::digest(b""));
 
     let transcript_inputs = TranscriptInputs {
         contract_hash,
-        prompt_template_hash: &empty_hash,
-        initiator_submission_hash: initiator_submission_hash.unwrap_or(&empty_hash),
-        responder_submission_hash: responder_submission_hash.unwrap_or(&empty_hash),
+        prompt_template_hash: missing_field,
+        initiator_submission_hash: initiator_submission_hash.unwrap_or(missing_field),
+        responder_submission_hash: responder_submission_hash.unwrap_or(missing_field),
         output_hash: &empty_hash,
         receipt_signing_pubkey_hex: &receipt_signing_pubkey_hex,
     };

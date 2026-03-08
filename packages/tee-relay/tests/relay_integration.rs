@@ -799,6 +799,31 @@ async fn relay_failure_receipt_on_provider_error() {
         receipt_core::canonicalize_serializable(&test_contract().output_schema).unwrap();
     let expected_hash = hex::encode(Sha256::digest(canonical.as_bytes()));
     assert_eq!(receipt.commitments.schema_hash, expected_hash);
+
+    let receipt_transcript_hex = tee_att
+        .transcript_hash_hex
+        .as_deref()
+        .expect("failure receipt transcript hash");
+    let recomputed = compute_transcript_hash(&TranscriptInputs {
+        contract_hash: &receipt.commitments.contract_hash,
+        prompt_template_hash: "",
+        initiator_submission_hash: receipt
+            .commitments
+            .initiator_submission_hash
+            .as_deref()
+            .unwrap_or(""),
+        responder_submission_hash: receipt
+            .commitments
+            .responder_submission_hash
+            .as_deref()
+            .unwrap_or(""),
+        output_hash: &receipt.commitments.output_hash,
+        receipt_signing_pubkey_hex: tee_att
+            .receipt_signing_pubkey_hex
+            .as_deref()
+            .expect("failure receipt signing pubkey"),
+    });
+    assert_eq!(receipt_transcript_hex, hex::encode(recomputed));
 }
 
 #[tokio::test]
