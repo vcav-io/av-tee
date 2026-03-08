@@ -115,6 +115,16 @@ pub async fn relay_core(
         .map_err(|_| RelayError::ContractValidation("invalid initiator input".to_string()))?;
     let input_b: DecryptedInput = serde_json::from_slice(responder_plaintext.as_slice())
         .map_err(|_| RelayError::ContractValidation("invalid responder input".to_string()))?;
+    if input_a.role != contract.participants[0] {
+        return Err(RelayError::ContractValidation(
+            "initiator role label does not match contract participant".to_string(),
+        ));
+    }
+    if input_b.role != contract.participants[1] {
+        return Err(RelayError::ContractValidation(
+            "responder role label does not match contract participant".to_string(),
+        ));
+    }
 
     // 3. Compute input commitments (hash of plaintext context, per participant)
     let input_commitments: Vec<InputCommitment> = {
@@ -152,10 +162,10 @@ pub async fn relay_core(
          Respond with ONLY the JSON object matching the output schema.",
         purpose = contract.purpose_code,
         schema_id = contract.output_schema_id,
-        role_a = input_a.role,
+        role_a = contract.participants[0],
         context_a = serde_json::to_string_pretty(&input_a.context)
             .map_err(|e| RelayError::PromptAssembly(format!("serialize input_a: {e}")))?,
-        role_b = input_b.role,
+        role_b = contract.participants[1],
         context_b = serde_json::to_string_pretty(&input_b.context)
             .map_err(|e| RelayError::PromptAssembly(format!("serialize input_b: {e}")))?,
     );
