@@ -63,6 +63,7 @@ pub async fn create_session(
         timing_class: None,
         metadata: serde_json::Value::Null,
         model_profile_id: None,
+        model_profile_hash: None,
         enforcement_policy_hash: None,
         output_schema_hash: None,
         model_constraints: None,

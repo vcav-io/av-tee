@@ -117,9 +117,9 @@ fn validate_contract_support(
         }
     }
 
-    if contract.model_profile_id.is_some() {
+    if contract.model_profile_id.is_some() || contract.model_profile_hash.is_some() {
         return Err(RelayError::ContractValidation(
-            "model_profile_id is not supported by tee-relay".to_string(),
+            "model_profile_id/model_profile_hash are not supported by tee-relay".to_string(),
         ));
     }
 
@@ -230,9 +230,7 @@ pub async fn relay_core(
     };
 
     // 6. Compute prompt template hash (inline prompt program for now)
-    let prompt_template_hash = {
-        INLINE_PROMPT_TEMPLATE_HASH.to_string()
-    };
+    let prompt_template_hash = { INLINE_PROMPT_TEMPLATE_HASH.to_string() };
 
     // 7. Resolve effective max_tokens
     let effective_max_tokens = match contract.max_completion_tokens {
