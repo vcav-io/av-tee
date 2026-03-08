@@ -80,6 +80,7 @@ fn test_contract() -> vault_family_types::Contract {
         timing_class: None,
         metadata: serde_json::Value::Null,
         model_profile_id: None,
+        model_profile_hash: None,
         enforcement_policy_hash: None,
         output_schema_hash: None,
         model_constraints: None,
@@ -1070,7 +1071,9 @@ async fn relay_plaintext_role_label_mismatch_aborts_session() {
         &session.session_id,
         &session.contract_hash,
         ParticipantRole::Initiator,
-        serde_json::to_vec(&mislabeled_init_input).unwrap().as_slice(),
+        serde_json::to_vec(&mislabeled_init_input)
+            .unwrap()
+            .as_slice(),
     );
     let init_resp = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
@@ -1101,7 +1104,10 @@ async fn relay_plaintext_role_label_mismatch_aborts_session() {
     let output = poll_until_done(&client, &base, &session.session_id, &session.read_token).await;
     assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
     let receipt = output.receipt_v2.expect("failure receipt");
-    assert_eq!(receipt.claims.status, Some(receipt_core::SessionStatus::Error));
+    assert_eq!(
+        receipt.claims.status,
+        Some(receipt_core::SessionStatus::Error)
+    );
 
     let status: SessionStatusResponse = client
         .get(format!("{base}/sessions/{}/status", session.session_id))
@@ -1128,7 +1134,10 @@ async fn relay_rejects_mismatched_relay_verifying_key() {
 
     assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
     let receipt = output.receipt_v2.expect("failure receipt");
-    assert_eq!(receipt.claims.status, Some(receipt_core::SessionStatus::Error));
+    assert_eq!(
+        receipt.claims.status,
+        Some(receipt_core::SessionStatus::Error)
+    );
 }
 
 #[tokio::test]
@@ -1139,6 +1148,20 @@ async fn relay_rejects_unsupported_model_profile_id() {
 
     let mut contract = test_contract();
     contract.model_profile_id = Some("profile-1".to_string());
+    let session = create_session(&client, &base, contract).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+}
+
+#[tokio::test]
+async fn relay_rejects_unsupported_model_profile_hash() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.model_profile_hash = Some("f".repeat(64));
     let session = create_session(&client, &base, contract).await;
     let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
 
