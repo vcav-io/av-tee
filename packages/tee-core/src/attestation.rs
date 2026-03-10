@@ -118,6 +118,7 @@ impl CvmRuntime for SimulatedCvm {
             measurement: self.identity.measurement.clone(),
             quote,
             user_data: *user_data,
+            vcek_cert_der: None,
         })
     }
 

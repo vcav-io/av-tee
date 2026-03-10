@@ -1,4 +1,4 @@
-mod snp_guest;
 pub mod runtime;
+mod snp_guest;
 
 pub use runtime::SevSnpCvm;

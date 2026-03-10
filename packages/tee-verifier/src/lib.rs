@@ -19,4 +19,4 @@ pub use result::{
     TranscriptBinding,
 };
 pub use snp_chain::{ProductFamily, TcbPolicy, VerificationConfig};
-pub use verify::{VerifyError, verify_tee_receipt};
+pub use verify::{VerifyError, verify_tee_receipt, verify_tee_receipt_with_config};

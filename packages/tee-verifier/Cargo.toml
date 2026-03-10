@@ -7,7 +7,7 @@ edition = "2024"
 tee-transcript = { path = "../tee-transcript" }
 
 # VFC types (receipt structures only)
-receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "e1dcee4" }
+receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "eb991eb" }
 
 # Crypto
 ed25519-dalek = { version = "2", features = ["rand_core"] }

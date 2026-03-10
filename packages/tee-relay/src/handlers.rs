@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
 use axum::response::IntoResponse;
 use rand::RngCore;
 use rand::rngs::OsRng;

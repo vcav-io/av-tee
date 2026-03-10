@@ -13,8 +13,8 @@ tee-snp = { path = "../tee-snp", optional = true }
 tee-transcript = { path = "../tee-transcript" }
 
 # VFC types
-receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "e1dcee4" }
-vault-family-types = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "e1dcee4" }
+receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "eb991eb" }
+vault-family-types = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "eb991eb" }
 
 # Web framework
 axum = "0.8"

@@ -21,6 +21,7 @@ pub(crate) struct ParsedReport {
     pub report_bytes: Vec<u8>,
     pub measurement_hex: String,
     pub user_data: [u8; 64],
+    pub vcek_cert_der: Option<Vec<u8>>,
 }
 
 // Report layout constants (AMD SEV-SNP ABI spec).
@@ -47,13 +48,22 @@ pub(crate) fn get_ext_report(
     fw: &mut Firmware,
     user_data: &[u8; 64],
 ) -> Result<ParsedReport, CvmError> {
-    let (report_bytes, _certs) = fw
+    let (report_bytes, certs) = fw
         .get_ext_report(None, Some(*user_data), Some(0))
-        .map_err(|e| {
-            CvmError::AttestationUnavailable(format!("SNP_GET_EXT_REPORT failed: {e}"))
-        })?;
+        .map_err(|e| CvmError::AttestationUnavailable(format!("SNP_GET_EXT_REPORT failed: {e}")))?;
 
-    parse_report_bytes(&report_bytes)
+    let vcek_cert_der = certs
+        .as_ref()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|e| e.cert_type == sev::firmware::guest::CertType::VCEK)
+        })
+        .map(|e| e.data.clone());
+
+    let mut parsed = parse_report_bytes(&report_bytes)?;
+    parsed.vcek_cert_der = vcek_cert_der;
+    Ok(parsed)
 }
 
 /// Parse raw report bytes to extract measurement and user_data.
@@ -67,11 +77,7 @@ pub(crate) fn parse_report_bytes(report_bytes: &[u8]) -> Result<ParsedReport, Cv
         )));
     }
 
-    let version = u32::from_le_bytes(
-        report_bytes[0..4]
-            .try_into()
-            .expect("4-byte slice"),
-    );
+    let version = u32::from_le_bytes(report_bytes[0..4].try_into().expect("4-byte slice"));
     if version < 2 {
         return Err(CvmError::AttestationUnavailable(format!(
             "unsupported report version {version}, expected >= 2"
@@ -89,6 +95,7 @@ pub(crate) fn parse_report_bytes(report_bytes: &[u8]) -> Result<ParsedReport, Cv
         report_bytes: report_bytes.to_vec(),
         measurement_hex,
         user_data,
+        vcek_cert_der: None,
     })
 }
 
@@ -102,8 +109,7 @@ pub(crate) fn derive_seal_key(fw: &mut Firmware) -> Result<Zeroizing<[u8; 32]>, 
 
     let request = DerivedKey::new(
         false, // root_key_select: false = VCEK
-        gfs,
-        0,    // vmpl
+        gfs, 0,    // vmpl
         0,    // guest_svn
         0,    // tcb_version
         None, // launch_mit_vector

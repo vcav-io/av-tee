@@ -11,6 +11,7 @@ use crate::result::{
     AttestationHashStatus, AttestationStatus, SignatureStatus, TeeVerificationResult,
     TranscriptBinding,
 };
+use crate::snp_chain::{self, VerificationConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
@@ -24,6 +25,20 @@ pub fn verify_tee_receipt(
     receipt: &ReceiptV2,
     allowlist: &dyn TransparencySource,
     quote_verifier: &dyn QuoteVerifier,
+) -> Result<TeeVerificationResult, VerifyError> {
+    verify_tee_receipt_with_config(
+        receipt,
+        allowlist,
+        quote_verifier,
+        &VerificationConfig::default(),
+    )
+}
+
+pub fn verify_tee_receipt_with_config(
+    receipt: &ReceiptV2,
+    allowlist: &dyn TransparencySource,
+    quote_verifier: &dyn QuoteVerifier,
+    config: &VerificationConfig,
 ) -> Result<TeeVerificationResult, VerifyError> {
     let tee_att = receipt
         .tee_attestation
@@ -93,10 +108,32 @@ pub fn verify_tee_receipt(
     };
 
     // 2c. Chain verification: upgrade Parsed → ChainVerified when VCEK cert
-    // is available. Wave 2 adds TeeAttestation.snp_vcek_cert and
-    // verify_tee_receipt_with_config() to wire snp_chain::verify_snp_attestation
-    // into this flow. "Present but malformed" must be QuoteInvalid, not a
-    // silent fallback.
+    // is present. "Present but malformed" is QuoteInvalid, not silent fallback.
+    // "Absent" stays at Parsed.
+    let attestation_status = match (&attestation_status, &tee_att.snp_vcek_cert) {
+        (AttestationStatus::QuoteParsed, Some(vcek_b64)) => {
+            let b64 = base64::engine::general_purpose::STANDARD;
+            match b64.decode(vcek_b64) {
+                Err(_) => AttestationStatus::QuoteInvalid(QuoteVerifyError::ChainInvalid(
+                    "snp_vcek_cert base64 decode failed".into(),
+                )),
+                Ok(vcek_der) => {
+                    // quote_bytes: re-decode from tee_att.quote (already validated above)
+                    let quote_bytes = tee_att
+                        .quote
+                        .as_ref()
+                        .and_then(|q| b64.decode(q).ok())
+                        .unwrap_or_default();
+                    match snp_chain::verify_snp_attestation(&quote_bytes, &vcek_der, config) {
+                        Ok(()) => AttestationStatus::QuoteVerified,
+                        Err(e) => AttestationStatus::QuoteInvalid(e),
+                    }
+                }
+            }
+        }
+        (AttestationStatus::QuoteParsed, None) => attestation_status,
+        _ => attestation_status,
+    };
 
     // 3. Measurement allowlist (exact match)
     let measurement_match = allowlist.is_allowed(tee_att.measurement.as_deref().unwrap_or(""));

@@ -439,6 +439,9 @@ async fn build_tee_receipt_v2(
             receipt_signing_pubkey_hex: Some(receipt_signing_pubkey_hex.clone()),
             transcript_hash_hex: Some(transcript_hash_hex.clone()),
             user_data_hex: Some(transcript_hash_hex),
+            snp_vcek_cert: report
+                .vcek_cert_der
+                .map(|b| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b)),
         }),
     };
 
@@ -565,6 +568,9 @@ pub async fn build_failure_receipt_v2(
             receipt_signing_pubkey_hex: Some(receipt_signing_pubkey_hex.clone()),
             transcript_hash_hex: Some(transcript_hash_hex.clone()),
             user_data_hex: Some(transcript_hash_hex),
+            snp_vcek_cert: report
+                .vcek_cert_der
+                .map(|b| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b)),
         }),
     };
 

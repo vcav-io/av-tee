@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
-use tee_core::attestation::{CvmError, CvmRuntime};
-use tee_core::types::{AttestationReport, EnclaveIdentity};
 #[cfg(any(target_os = "linux", test))]
 use tee_core::TeeType;
+use tee_core::attestation::{CvmError, CvmRuntime};
+use tee_core::types::{AttestationReport, EnclaveIdentity};
 
 #[cfg(target_os = "linux")]
 use crate::snp_guest;
@@ -107,9 +107,9 @@ impl SevSnpCvm {
         match &self.inner {
             #[cfg(target_os = "linux")]
             SevSnpInner::Hardware(fw) => {
-                let mut fw = fw.lock().map_err(|e| {
-                    CvmError::SealError(format!("firmware mutex poisoned: {e}"))
-                })?;
+                let mut fw = fw
+                    .lock()
+                    .map_err(|e| CvmError::SealError(format!("firmware mutex poisoned: {e}")))?;
                 snp_guest::derive_seal_key(&mut fw)
             }
             #[cfg(test)]
@@ -143,6 +143,7 @@ impl CvmRuntime for SevSnpCvm {
                     measurement: parsed.measurement_hex,
                     quote: parsed.report_bytes,
                     user_data: parsed.user_data,
+                    vcek_cert_der: parsed.vcek_cert_der,
                 })
             }
             #[cfg(test)]
@@ -157,6 +158,7 @@ impl CvmRuntime for SevSnpCvm {
                     measurement: measurement.clone(),
                     quote: report,
                     user_data: *user_data,
+                    vcek_cert_der: None,
                 })
             }
             #[cfg(not(any(target_os = "linux", test)))]
