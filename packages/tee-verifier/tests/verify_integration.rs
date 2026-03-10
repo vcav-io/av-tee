@@ -44,6 +44,13 @@ fn snp_quote_builder(measurement: [u8; 48]) -> QuoteBuilder {
 }
 
 fn build_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
+    build_receipt_with_vcek(quote_builder, None)
+}
+
+fn build_receipt_with_vcek(
+    quote_builder: QuoteBuilder,
+    snp_vcek_cert: Option<String>,
+) -> (ReceiptV2, SigningKey) {
     let mut rng = rand::thread_rng();
     let signing_key = SigningKey::generate(&mut rng);
     let pubkey_hex = receipt_core::public_key_to_hex(&signing_key.verifying_key());
@@ -147,7 +154,7 @@ fn build_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
             receipt_signing_pubkey_hex: Some(pubkey_hex),
             transcript_hash_hex: Some(transcript_hash_hex),
             user_data_hex: Some(user_data_hex),
-            snp_vcek_cert: None,
+            snp_vcek_cert,
         }),
     };
 
@@ -364,11 +371,125 @@ fn is_valid_sans_quote_ignores_attestation() {
 }
 
 // ---------------------------------------------------------------------------
-// SNP chain verification (direct snp_chain tests — Wave 1 contract)
+// SNP chain verification through verify_tee_receipt (Wave 2 — receipt-level)
 //
-// These test snp_chain::verify_snp_attestation directly since TeeAttestation
-// doesn't have snp_vcek_cert yet (Wave 2). They prove the verification model
-// works with synthetic cert hierarchies.
+// These test the step 2c code path in verify.rs: when snp_vcek_cert is present,
+// QuoteParsed should be upgraded to QuoteVerified (or QuoteInvalid on failure).
+// The positive path (QuoteParsed → QuoteVerified) requires a real AMD-signed VCEK
+// and is not testable with synthetic certs. The negative paths are all tested.
+// ---------------------------------------------------------------------------
+
+mod snp_vcek_receipt_tests {
+    use super::*;
+    use tee_verifier::{QuoteVerifyError, SevSnpQuoteVerifier};
+
+    #[test]
+    fn malformed_base64_vcek_cert_is_quote_invalid() {
+        // snp_vcek_cert present but not valid base64 → hard failure, not silent fallback
+        let snp_measurement = [0xBB_u8; 48];
+        let (receipt, _key) = build_receipt_with_vcek(
+            snp_quote_builder(snp_measurement),
+            Some("!!!not-valid-base64!!!".to_string()),
+        );
+        let allowlist = allowlist_with(&hex::encode(snp_measurement));
+        let verifier = SevSnpQuoteVerifier::parsing_only();
+
+        let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+
+        assert!(
+            matches!(
+                result.attestation_status,
+                AttestationStatus::QuoteInvalid(QuoteVerifyError::ChainInvalid(ref msg))
+                    if msg.contains("base64 decode failed")
+            ),
+            "expected QuoteInvalid with base64 error, got: {:?}",
+            result.attestation_status
+        );
+        assert!(!result.is_valid());
+        assert!(!result.is_valid_parsed());
+    }
+
+    #[test]
+    fn garbage_der_vcek_cert_is_quote_invalid() {
+        // snp_vcek_cert decodes as base64 but is not valid DER → hard failure
+        let snp_measurement = [0xBB_u8; 48];
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let garbage_b64 = base64::Engine::encode(&b64, &[0xFF, 0xFE, 0xFD, 0xFC, 0xFB]);
+        let (receipt, _key) =
+            build_receipt_with_vcek(snp_quote_builder(snp_measurement), Some(garbage_b64));
+        let allowlist = allowlist_with(&hex::encode(snp_measurement));
+        let verifier = SevSnpQuoteVerifier::parsing_only();
+
+        let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+
+        assert!(
+            matches!(
+                result.attestation_status,
+                AttestationStatus::QuoteInvalid(QuoteVerifyError::ChainInvalid(ref msg))
+                    if msg.contains("failed to parse VCEK")
+            ),
+            "expected QuoteInvalid with VCEK parse error, got: {:?}",
+            result.attestation_status
+        );
+        assert!(!result.is_valid());
+        assert!(!result.is_valid_parsed());
+    }
+
+    #[test]
+    fn self_signed_vcek_cert_unsupported_family() {
+        // Valid P-384 cert but not signed by any bundled AMD ASK → unsupported family
+        let snp_measurement = [0xBB_u8; 48];
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let cert_params = rcgen::CertificateParams::new(vec!["test-vcek".into()]).unwrap();
+        let cert = cert_params.self_signed(&key_pair).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let vcek_b64 = base64::Engine::encode(&b64, cert.der());
+
+        let (receipt, _key) =
+            build_receipt_with_vcek(snp_quote_builder(snp_measurement), Some(vcek_b64));
+        let allowlist = allowlist_with(&hex::encode(snp_measurement));
+        let verifier = SevSnpQuoteVerifier::parsing_only();
+
+        let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+
+        assert!(
+            matches!(
+                result.attestation_status,
+                AttestationStatus::QuoteInvalid(QuoteVerifyError::ChainInvalid(ref msg))
+                    if msg.contains("unsupported product family")
+            ),
+            "expected QuoteInvalid with unsupported family, got: {:?}",
+            result.attestation_status
+        );
+        assert!(!result.is_valid());
+        assert!(!result.is_valid_parsed());
+    }
+
+    #[test]
+    fn absent_vcek_cert_stays_parsed() {
+        // snp_vcek_cert: None → stays at QuoteParsed (no chain verification attempted)
+        let snp_measurement = [0xBB_u8; 48];
+        let (receipt, _key) = build_receipt_with_vcek(snp_quote_builder(snp_measurement), None);
+        let allowlist = allowlist_with(&hex::encode(snp_measurement));
+        let verifier = SevSnpQuoteVerifier::parsing_only();
+
+        let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+
+        assert_eq!(
+            result.attestation_status,
+            AttestationStatus::QuoteParsed,
+            "absent vcek cert should leave status at QuoteParsed"
+        );
+        assert!(!result.is_valid());
+        assert!(result.is_valid_parsed());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SNP chain verification (direct snp_chain tests)
+//
+// These test snp_chain::verify_snp_attestation directly. They prove the
+// verification model works with synthetic cert hierarchies.
 // ---------------------------------------------------------------------------
 
 mod snp_chain_tests {
