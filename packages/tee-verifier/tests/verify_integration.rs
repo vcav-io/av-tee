@@ -557,11 +557,12 @@ mod snp_sig_tests {
     use rand::rngs::OsRng;
     use tee_verifier::{QuoteVerifyError, snp_sig};
 
-    const SIG_ALGO_OFFSET: usize = 672;
-    const SIG_R_OFFSET: usize = 676;
-    const SIG_S_OFFSET: usize = 748;
+    const SIG_ALGO_OFFSET: usize = 52;
+    const SIG_R_OFFSET: usize = 672;
+    const SIG_S_OFFSET: usize = 744;
     const SIG_COMPONENT_LEN: usize = 72;
-    const POLICY_OFFSET: usize = 24;
+    const POLICY_OFFSET: usize = 8;
+    const FLAGS_OFFSET: usize = 72;
     const SIGNED_REGION_END: usize = 672;
 
     fn be_to_le_padded(be_bytes: &[u8], pad_len: usize) -> Vec<u8> {
@@ -574,21 +575,29 @@ mod snp_sig_tests {
         let mut report = vec![0u8; 1184];
         report[0..4].copy_from_slice(&2u32.to_le_bytes());
 
+        // Policy (offset 8): bit 19 = DEBUG
         let mut policy: u64 = 0;
-        if vlek {
-            policy |= 1 << 2;
-        }
         if debug {
             policy |= 1 << 19;
         }
         report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
+
+        // Signature algo (offset 52, inside signed region)
+        report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
+
+        // Flags (offset 72): bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK)
+        let mut flags: u32 = 0;
+        if vlek {
+            flags |= 1;
+        }
+        report[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+
         report[80..144].copy_from_slice(&[0xAA; 64]);
         report[144..192].copy_from_slice(&[0xBB; 48]);
 
-        // Sign
+        // Sign (all header fields set before signing)
         let signed_region = &report[..SIGNED_REGION_END];
         let signature: Signature = signing_key.sign(signed_region);
-        report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
         let sig_bytes = signature.to_bytes();
         report[SIG_R_OFFSET..SIG_R_OFFSET + SIG_COMPONENT_LEN]
             .copy_from_slice(&be_to_le_padded(&sig_bytes[..48], SIG_COMPONENT_LEN));
