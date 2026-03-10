@@ -130,12 +130,12 @@ fn validate_contract_support(
     }
 
     let inline_schema_hash = canonical_sha256(&contract.output_schema)?;
-    if let Some(expected_schema_hash) = contract.output_schema_hash.as_deref() {
-        if expected_schema_hash != inline_schema_hash {
-            return Err(RelayError::ContractValidation(
-                "output_schema_hash does not match inline output_schema".to_string(),
-            ));
-        }
+    if let Some(expected_schema_hash) = contract.output_schema_hash.as_deref()
+        && expected_schema_hash != inline_schema_hash
+    {
+        return Err(RelayError::ContractValidation(
+            "output_schema_hash does not match inline output_schema".to_string(),
+        ));
     }
 
     Ok(inline_schema_hash)

@@ -48,6 +48,7 @@ pub struct Session {
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id_bytes: [u8; 16],
         contract_hash_bytes: Vec<u8>,
