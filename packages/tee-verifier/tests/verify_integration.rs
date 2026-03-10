@@ -72,7 +72,7 @@ fn build_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
     let attestation_hash = hex::encode(Sha256::digest(&quote_bytes));
     let user_data_hex = hex::encode(transcript_hash);
     let transcript_hash_hex = hex::encode(transcript_hash);
-    let operator_key_fingerprint = hex::encode(Sha256::digest(&hex::decode(&pubkey_hex).unwrap()));
+    let operator_key_fingerprint = hex::encode(Sha256::digest(hex::decode(&pubkey_hex).unwrap()));
 
     let unsigned = UnsignedReceiptV2 {
         receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
@@ -360,4 +360,176 @@ fn is_valid_sans_quote_ignores_attestation() {
     assert!(!result.is_valid());
     assert!(!result.is_valid_parsed());
     assert!(result.is_valid_sans_quote());
+}
+
+// ---------------------------------------------------------------------------
+// SNP chain verification (direct snp_chain tests — Wave 1 contract)
+//
+// These test snp_chain::verify_snp_attestation directly since TeeAttestation
+// doesn't have snp_vcek_cert yet (Wave 2). They prove the verification model
+// works with synthetic cert hierarchies.
+// ---------------------------------------------------------------------------
+
+mod snp_chain_tests {
+    use tee_verifier::snp_chain;
+    use tee_verifier::{QuoteVerifyError, TcbPolicy, VerificationConfig};
+
+    #[test]
+    fn snp_unsupported_family_rejected() {
+        // Self-signed VCEK not in any AMD chain → unsupported family
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let cert_params = rcgen::CertificateParams::new(vec!["test-vcek".into()]).unwrap();
+        let cert = cert_params.self_signed(&key_pair).unwrap();
+        let vcek_der = cert.der().to_vec();
+
+        let report = vec![0u8; 1184];
+        let config = VerificationConfig::default();
+
+        let err = snp_chain::verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
+        assert!(
+            matches!(err, QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("unsupported product family")),
+            "expected unsupported family, got: {err}"
+        );
+    }
+
+    #[test]
+    fn snp_malformed_vcek_cert_rejected() {
+        // Garbage DER → parse failure (not silent fallback)
+        let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
+        let report = vec![0u8; 1184];
+        let config = VerificationConfig::default();
+
+        let err = snp_chain::verify_snp_attestation(&report, &garbage, &config).unwrap_err();
+        assert!(
+            matches!(err, QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("failed to parse VCEK")),
+            "expected parse failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn snp_chain_types_are_exported() {
+        let _config = VerificationConfig::default();
+        let _policy = TcbPolicy {
+            boot_loader_min: 1,
+            tee_min: 0,
+            snp_min: 0,
+            microcode_min: 0,
+        };
+        let _family = tee_verifier::ProductFamily::Milan;
+        let _family2 = tee_verifier::ProductFamily::Genoa;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SNP report signature verification (snp_sig — direct tests)
+//
+// These exercise the actual policy and signature checks in snp_sig, not
+// through the chain (which requires AMD-signed certs). The unit tests in
+// snp_sig::tests cover the same paths, but these integration tests confirm
+// the public module boundary works correctly.
+// ---------------------------------------------------------------------------
+
+mod snp_sig_tests {
+    use ecdsa::signature::Signer;
+    use p384::ecdsa::{Signature, SigningKey, VerifyingKey};
+    use rand::rngs::OsRng;
+    use tee_verifier::{QuoteVerifyError, snp_sig};
+
+    const SIG_ALGO_OFFSET: usize = 672;
+    const SIG_R_OFFSET: usize = 676;
+    const SIG_S_OFFSET: usize = 748;
+    const SIG_COMPONENT_LEN: usize = 72;
+    const POLICY_OFFSET: usize = 24;
+    const SIGNED_REGION_END: usize = 672;
+
+    fn be_to_le_padded(be_bytes: &[u8], pad_len: usize) -> Vec<u8> {
+        let mut le: Vec<u8> = be_bytes.iter().rev().copied().collect();
+        le.resize(pad_len, 0);
+        le
+    }
+
+    fn build_signed_report(signing_key: &SigningKey, debug: bool, vlek: bool) -> Vec<u8> {
+        let mut report = vec![0u8; 1184];
+        report[0..4].copy_from_slice(&2u32.to_le_bytes());
+
+        let mut policy: u64 = 0;
+        if vlek {
+            policy |= 1 << 2;
+        }
+        if debug {
+            policy |= 1 << 19;
+        }
+        report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
+        report[80..144].copy_from_slice(&[0xAA; 64]);
+        report[144..192].copy_from_slice(&[0xBB; 48]);
+
+        // Sign
+        let signed_region = &report[..SIGNED_REGION_END];
+        let signature: Signature = signing_key.sign(signed_region);
+        report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
+        let sig_bytes = signature.to_bytes();
+        report[SIG_R_OFFSET..SIG_R_OFFSET + SIG_COMPONENT_LEN]
+            .copy_from_slice(&be_to_le_padded(&sig_bytes[..48], SIG_COMPONENT_LEN));
+        report[SIG_S_OFFSET..SIG_S_OFFSET + SIG_COMPONENT_LEN]
+            .copy_from_slice(&be_to_le_padded(&sig_bytes[48..], SIG_COMPONENT_LEN));
+
+        report
+    }
+
+    #[test]
+    fn valid_report_passes() {
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = VerifyingKey::from(&sk);
+        let report = build_signed_report(&sk, false, false);
+        snp_sig::verify_report_signature(&report, &vk).unwrap();
+    }
+
+    #[test]
+    fn tampered_report_rejected() {
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = VerifyingKey::from(&sk);
+        let mut report = build_signed_report(&sk, false, false);
+        report[100] ^= 0xFF;
+        let err = snp_sig::verify_report_signature(&report, &vk).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("signature invalid")
+        ));
+    }
+
+    #[test]
+    fn debug_mode_rejected() {
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = VerifyingKey::from(&sk);
+        let report = build_signed_report(&sk, true, false);
+        let err = snp_sig::verify_report_signature(&report, &vk).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("DEBUG")
+        ));
+    }
+
+    #[test]
+    fn vlek_signer_rejected() {
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = VerifyingKey::from(&sk);
+        let report = build_signed_report(&sk, false, true);
+        let err = snp_sig::verify_report_signature(&report, &vk).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("VLEK")
+        ));
+    }
+
+    #[test]
+    fn wrong_key_rejected() {
+        let sk = SigningKey::random(&mut OsRng);
+        let wrong_vk = VerifyingKey::from(&SigningKey::random(&mut OsRng));
+        let report = build_signed_report(&sk, false, false);
+        let err = snp_sig::verify_report_signature(&report, &wrong_vk).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("signature invalid")
+        ));
+    }
 }

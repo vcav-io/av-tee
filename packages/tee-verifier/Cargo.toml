@@ -13,6 +13,15 @@ receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev =
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 
+# SNP chain verification (VCEK → ASK → ARK)
+p384 = { version = "0.13", features = ["ecdsa"] }
+ecdsa = { version = "0.16", features = ["verifying"] }
+rsa = "0.9"
+x509-cert = "0.2"
+der = { version = "0.7", features = ["alloc"] }
+spki = "0.7"
+signature = "2"
+
 # Serialization
 hex = "0.4"
 base64 = "0.22"
@@ -26,3 +35,4 @@ thiserror = "1"
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
+rcgen = "0.13"

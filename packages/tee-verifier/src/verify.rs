@@ -92,6 +92,12 @@ pub fn verify_tee_receipt(
         None => AttestationStatus::QuoteInvalid(QuoteVerifyError::MissingQuote),
     };
 
+    // 2c. Chain verification: upgrade Parsed → ChainVerified when VCEK cert
+    // is available. Wave 2 adds TeeAttestation.snp_vcek_cert and
+    // verify_tee_receipt_with_config() to wire snp_chain::verify_snp_attestation
+    // into this flow. "Present but malformed" must be QuoteInvalid, not a
+    // silent fallback.
+
     // 3. Measurement allowlist (exact match)
     let measurement_match = allowlist.is_allowed(tee_att.measurement.as_deref().unwrap_or(""));
 
