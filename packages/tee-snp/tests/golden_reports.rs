@@ -24,7 +24,9 @@ fn golden_report_standard_fields() {
     let report = build_synthetic_report(&user_data, &measurement);
 
     let verifier = SevSnpQuoteVerifier::parsing_only();
-    let result = verifier.verify_quote(&report).expect("parse should succeed");
+    let result = verifier
+        .verify_quote(&report)
+        .expect("parse should succeed");
 
     assert_eq!(result.fields.user_data, user_data);
     assert_eq!(result.fields.measurement, hex::encode(measurement));
@@ -37,7 +39,9 @@ fn golden_report_measurement_extraction_matches_adapter() {
     let report = build_synthetic_report(&user_data, &measurement_bytes);
 
     let verifier = SevSnpQuoteVerifier::parsing_only();
-    let result = verifier.verify_quote(&report).expect("parse should succeed");
+    let result = verifier
+        .verify_quote(&report)
+        .expect("parse should succeed");
 
     // The verifier's measurement field must equal the hex encoding of the raw bytes.
     let expected_hex = hex::encode(measurement_bytes);

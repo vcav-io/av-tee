@@ -37,6 +37,10 @@ pub struct AttestationReport {
     /// Transcript hash bound into the attestation via the platform's
     /// user_data field (64 bytes for SEV-SNP).
     pub user_data: [u8; 64],
+    /// DER-encoded VCEK certificate extracted from the SEV-SNP extended
+    /// attestation report's certificate chain. `None` for simulated CVMs
+    /// or if the hypervisor did not provide certificates.
+    pub vcek_cert_der: Option<Vec<u8>>,
 }
 
 /// Role of a session participant, used for AAD construction.

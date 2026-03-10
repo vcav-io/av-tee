@@ -1,7 +1,7 @@
 #![cfg(feature = "snp-live")]
 
-use tee_core::attestation::CvmRuntime;
 use tee_core::TeeType;
+use tee_core::attestation::CvmRuntime;
 use tee_snp::SevSnpCvm;
 
 #[test]

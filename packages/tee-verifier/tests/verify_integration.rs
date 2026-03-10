@@ -147,6 +147,7 @@ fn build_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
             receipt_signing_pubkey_hex: Some(pubkey_hex),
             transcript_hash_hex: Some(transcript_hash_hex),
             user_data_hex: Some(user_data_hex),
+            snp_vcek_cert: None,
         }),
     };
 
