@@ -3,13 +3,22 @@ use p384::ecdsa::{Signature, VerifyingKey};
 
 use crate::quote::QuoteVerifyError;
 
-/// SEV-SNP attestation report layout constants.
+/// SEV-SNP attestation report layout constants (AMD SEV-SNP ABI spec rev 1.55+).
+///
+/// Report structure (1184 bytes total):
+///   0..4     version (u32)
+///   4..8     guest_svn (u32)
+///   8..16    policy (u64)        — bit 19 = DEBUG
+///  52..56    signature_algo (u32) — 1 = ECDSA P-384/SHA-384
+///  72..76    flags (u32)         — bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK)
+/// 672..1184  signature structure: r[72] || s[72] || reserved[368]
 const SIGNED_REGION_END: usize = 672;
-const SIG_ALGO_OFFSET: usize = 672;
-const SIG_R_OFFSET: usize = 676;
-const SIG_S_OFFSET: usize = 748;
+const SIG_ALGO_OFFSET: usize = 52;
+const SIG_R_OFFSET: usize = 672;
+const SIG_S_OFFSET: usize = 744;
 const SIG_COMPONENT_LEN: usize = 72;
-const POLICY_OFFSET: usize = 24;
+const POLICY_OFFSET: usize = 8;
+const FLAGS_OFFSET: usize = 72;
 
 /// Expected ECDSA P-384 with SHA-384 algorithm identifier.
 const ECDSA_P384_SHA384: u32 = 1;
@@ -17,9 +26,12 @@ const ECDSA_P384_SHA384: u32 = 1;
 /// Verify the ECDSA P-384 signature on an SEV-SNP attestation report.
 ///
 /// The signed region is bytes 0..672 of the 1184-byte report.
-/// The signature (r, s) is stored in little-endian at offsets 676 and 748,
+/// The signature (r, s) is stored in little-endian at offsets 672 and 744,
 /// each zero-padded to 72 bytes. We reverse byte order and trim to 48 bytes
 /// (P-384 field element size) before constructing the signature.
+///
+/// The signature algorithm field is at offset 52 (in the report header),
+/// NOT inside the signature structure.
 pub fn verify_report_signature(
     report_bytes: &[u8],
     vcek_pubkey: &VerifyingKey,
@@ -70,22 +82,29 @@ pub fn verify_report_signature(
         .map_err(|e| QuoteVerifyError::ChainInvalid(format!("report signature invalid: {e}")))
 }
 
-/// Check report policy bits for security-critical flags.
+/// Check report policy and flags for security-critical bits.
+///
+/// POLICY (offset 8, u64): bit 19 = DEBUG (must be 0 for production).
+/// FLAGS (offset 72, u32): bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK; must be 0).
 fn check_report_policy(report_bytes: &[u8]) -> Result<(), QuoteVerifyError> {
+    // FLAGS.SIGNING_KEY (bit 0): must be 0 (VCEK). 1 means VLEK.
+    let flags = u32::from_le_bytes(
+        report_bytes[FLAGS_OFFSET..FLAGS_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
+    if flags & 1 != 0 {
+        return Err(QuoteVerifyError::ChainInvalid(
+            "report signed with VLEK (FLAGS.SIGNING_KEY=1), only VCEK is accepted".into(),
+        ));
+    }
+
+    // POLICY.DEBUG (bit 19): must be 0 (production mode).
     let policy = u64::from_le_bytes(
         report_bytes[POLICY_OFFSET..POLICY_OFFSET + 8]
             .try_into()
             .unwrap(),
     );
-
-    // Bit 2: SIGNING_KEY — must be 0 (VCEK). 1 means VLEK.
-    if policy & (1 << 2) != 0 {
-        return Err(QuoteVerifyError::ChainInvalid(
-            "report signed with VLEK (bit 2 set), only VCEK is accepted".into(),
-        ));
-    }
-
-    // Bit 19: DEBUG — must be 0 (production mode).
     if policy & (1 << 19) != 0 {
         return Err(QuoteVerifyError::ChainInvalid(
             "report has DEBUG policy bit set (bit 19), rejecting non-production report".into(),
@@ -119,15 +138,23 @@ mod tests {
         // Version 2
         report[0..4].copy_from_slice(&2u32.to_le_bytes());
 
-        // Policy
+        // Policy (offset 8): bit 19 = DEBUG
         let mut policy: u64 = 0;
-        if vlek {
-            policy |= 1 << 2;
-        }
         if debug {
             policy |= 1 << 19;
         }
         report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
+
+        // Flags (offset 72): bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK)
+        let mut flags: u32 = 0;
+        if vlek {
+            flags |= 1;
+        }
+        report[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+
+        // Signature algo = 1 (ECDSA P-384) — at offset 52, inside signed region
+        report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4]
+            .copy_from_slice(&ECDSA_P384_SHA384.to_le_bytes());
 
         // Some user_data
         report[80..144].copy_from_slice(&[0xAA; 64]);
@@ -135,12 +162,9 @@ mod tests {
         // Measurement
         report[144..192].copy_from_slice(&[0xBB; 48]);
 
-        // Sign the first 672 bytes
+        // Sign the first 672 bytes (includes all header fields)
         let signed_region = &report[..SIGNED_REGION_END];
         let signature: Signature = signing_key.sign(signed_region);
-
-        // Signature algo = 1 (ECDSA P-384)
-        report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
 
         // Encode r and s in little-endian, zero-padded to 72 bytes
         let sig_bytes = signature.to_bytes();

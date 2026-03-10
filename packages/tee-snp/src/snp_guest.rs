@@ -57,7 +57,7 @@ pub(crate) fn get_ext_report(
         .and_then(|entries| {
             entries
                 .iter()
-                .find(|e| e.cert_type == sev::firmware::guest::CertType::VCEK)
+                .find(|e| e.cert_type == sev::firmware::host::CertType::VCEK)
         })
         .map(|e| e.data.clone());
 
