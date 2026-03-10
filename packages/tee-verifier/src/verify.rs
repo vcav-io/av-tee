@@ -11,7 +11,6 @@ use crate::result::{
     AttestationHashStatus, AttestationStatus, SignatureStatus, TeeVerificationResult,
     TranscriptBinding,
 };
-use crate::snp_chain::VerificationConfig;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
@@ -21,28 +20,10 @@ pub enum VerifyError {
     SignatureError(String),
 }
 
-/// Verify a TEE receipt with default configuration.
-///
-/// Equivalent to `verify_tee_receipt_with_config(receipt, allowlist, quote_verifier, &VerificationConfig::default())`.
 pub fn verify_tee_receipt(
     receipt: &ReceiptV2,
     allowlist: &dyn TransparencySource,
     quote_verifier: &dyn QuoteVerifier,
-) -> Result<TeeVerificationResult, VerifyError> {
-    verify_tee_receipt_with_config(
-        receipt,
-        allowlist,
-        quote_verifier,
-        &VerificationConfig::default(),
-    )
-}
-
-/// Verify a TEE receipt with explicit configuration (TCB policy, etc).
-pub fn verify_tee_receipt_with_config(
-    receipt: &ReceiptV2,
-    allowlist: &dyn TransparencySource,
-    quote_verifier: &dyn QuoteVerifier,
-    config: &VerificationConfig,
 ) -> Result<TeeVerificationResult, VerifyError> {
     let tee_att = receipt
         .tee_attestation
@@ -112,18 +93,10 @@ pub fn verify_tee_receipt_with_config(
     };
 
     // 2c. Chain verification: upgrade Parsed → ChainVerified when VCEK cert
-    // is available. Currently requires TeeAttestation.snp_vcek_cert field
-    // which will be added in Wave 2 (VFC update). Once available, the wiring is:
-    //
-    //   match (&attestation_status, &tee_att.snp_vcek_cert) {
-    //       (QuoteParsed, Some(vcek_b64)) => decode + verify_snp_attestation(),
-    //       (QuoteParsed, None) => stays Parsed,
-    //       _ => unchanged,
-    //   }
-    //
-    // "Present but malformed" must be a hard failure (QuoteInvalid), not a
-    // silent fallback. Only "absent" stays Parsed.
-    let _ = config; // used once snp_vcek_cert field exists
+    // is available. Wave 2 adds TeeAttestation.snp_vcek_cert and
+    // verify_tee_receipt_with_config() to wire snp_chain::verify_snp_attestation
+    // into this flow. "Present but malformed" must be QuoteInvalid, not a
+    // silent fallback.
 
     // 3. Measurement allowlist (exact match)
     let measurement_match = allowlist.is_allowed(tee_att.measurement.as_deref().unwrap_or(""));

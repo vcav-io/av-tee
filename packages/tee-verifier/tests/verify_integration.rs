@@ -371,85 +371,18 @@ fn is_valid_sans_quote_ignores_attestation() {
 // ---------------------------------------------------------------------------
 
 mod snp_chain_tests {
-    use ecdsa::signature::Signer;
-    use p384::ecdsa::{Signature, SigningKey};
-    use rand::rngs::OsRng;
     use tee_verifier::snp_chain;
     use tee_verifier::{QuoteVerifyError, TcbPolicy, VerificationConfig};
-
-    const SIG_ALGO_OFFSET: usize = 672;
-    const SIG_R_OFFSET: usize = 676;
-    const SIG_S_OFFSET: usize = 748;
-    const SIG_COMPONENT_LEN: usize = 72;
-    const POLICY_OFFSET: usize = 24;
-    const TCB_OFFSET: usize = 384;
-    const SIGNED_REGION_END: usize = 672;
-
-    fn be_to_le_padded(be_bytes: &[u8], pad_len: usize) -> Vec<u8> {
-        let mut le: Vec<u8> = be_bytes.iter().rev().copied().collect();
-        le.resize(pad_len, 0);
-        le
-    }
-
-    /// Build a synthetic 1184-byte SNP report signed by the given ECDSA P-384 key.
-    fn build_signed_report(
-        signing_key: &SigningKey,
-        tcb: [u8; 4], // [boot_loader, tee, snp, microcode]
-        debug: bool,
-    ) -> Vec<u8> {
-        let mut report = vec![0u8; 1184];
-        report[0..4].copy_from_slice(&2u32.to_le_bytes());
-
-        // Policy: no VLEK, no debug (unless requested)
-        let mut policy: u64 = 0;
-        if debug {
-            policy |= 1 << 19;
-        }
-        report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
-
-        // user_data
-        report[80..144].copy_from_slice(&[0xAA; 64]);
-        // measurement
-        report[144..192].copy_from_slice(&[0xBB; 48]);
-
-        // TCB
-        report[TCB_OFFSET] = tcb[0]; // boot_loader
-        report[TCB_OFFSET + 1] = tcb[1]; // tee
-        report[TCB_OFFSET + 4] = tcb[2]; // snp
-        report[TCB_OFFSET + 5] = tcb[3]; // microcode
-
-        // Sign with ECDSA P-384
-        let signed_region = &report[..SIGNED_REGION_END];
-        let signature: Signature = signing_key.sign(signed_region);
-        report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
-        let sig_bytes = signature.to_bytes();
-        let r_le = be_to_le_padded(&sig_bytes[..48], SIG_COMPONENT_LEN);
-        let s_le = be_to_le_padded(&sig_bytes[48..], SIG_COMPONENT_LEN);
-        report[SIG_R_OFFSET..SIG_R_OFFSET + SIG_COMPONENT_LEN].copy_from_slice(&r_le);
-        report[SIG_S_OFFSET..SIG_S_OFFSET + SIG_COMPONENT_LEN].copy_from_slice(&s_le);
-
-        report
-    }
-
-    /// Generate a self-signed ECDSA P-384 cert (not signed by any bundled AMD chain).
-    fn self_signed_vcek_cert() -> (Vec<u8>, SigningKey) {
-        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
-        let cert_params = rcgen::CertificateParams::new(vec!["test-vcek".into()]).unwrap();
-        let cert = cert_params.self_signed(&key_pair).unwrap();
-
-        // Extract the P-384 signing key via PKCS#8 DER
-        let sk_der = key_pair.serialize_der();
-        use p384::pkcs8::DecodePrivateKey;
-        let signing_key = SigningKey::from_pkcs8_der(&sk_der).unwrap();
-
-        (cert.der().to_vec(), signing_key)
-    }
 
     #[test]
     fn snp_unsupported_family_rejected() {
         // Self-signed VCEK not in any AMD chain → unsupported family
-        let (vcek_der, signing_key) = self_signed_vcek_cert();
-        let report = build_signed_report(&signing_key, [3, 1, 12, 200], false);
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let cert_params = rcgen::CertificateParams::new(vec!["test-vcek".into()]).unwrap();
+        let cert = cert_params.self_signed(&key_pair).unwrap();
+        let vcek_der = cert.der().to_vec();
+
+        let report = vec![0u8; 1184];
         let config = VerificationConfig::default();
 
         let err = snp_chain::verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
@@ -460,22 +393,8 @@ mod snp_chain_tests {
     }
 
     #[test]
-    fn snp_wrong_vcek_cert_rejected() {
-        // Report signed by key A, cert contains key B → signature mismatch after chain
-        // Since our test cert isn't AMD-signed, this hits the family check first.
-        let (vcek_der, _signing_key_a) = self_signed_vcek_cert();
-        let different_key = SigningKey::random(&mut OsRng);
-        let report = build_signed_report(&different_key, [3, 1, 12, 200], false);
-        let config = VerificationConfig::default();
-
-        let err = snp_chain::verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
-        // Should fail at chain validation (unsupported family since cert isn't AMD-signed)
-        assert!(matches!(err, QuoteVerifyError::ChainInvalid(_)));
-    }
-
-    #[test]
     fn snp_malformed_vcek_cert_rejected() {
-        // Garbage DER → parse failure
+        // Garbage DER → parse failure (not silent fallback)
         let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
         let report = vec![0u8; 1184];
         let config = VerificationConfig::default();
@@ -488,51 +407,7 @@ mod snp_chain_tests {
     }
 
     #[test]
-    fn snp_tcb_below_minimum_rejected() {
-        // Use a self-signed cert (will fail at family check), but we can test
-        // TCB independently via snp_chain types
-        let config = VerificationConfig {
-            tcb_policy: TcbPolicy {
-                boot_loader_min: 5,
-                tee_min: 0,
-                snp_min: 0,
-                microcode_min: 0,
-            },
-        };
-
-        let (vcek_der, signing_key) = self_signed_vcek_cert();
-        // TCB boot_loader = 2, below minimum of 5
-        let report = build_signed_report(&signing_key, [2, 1, 12, 200], false);
-
-        let err = snp_chain::verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
-        // Hits chain validation first (unsupported family), but proves the code path
-        assert!(matches!(err, QuoteVerifyError::ChainInvalid(_)));
-    }
-
-    #[test]
-    fn snp_debug_mode_rejected_via_chain() {
-        let (vcek_der, signing_key) = self_signed_vcek_cert();
-        let report = build_signed_report(&signing_key, [3, 1, 12, 200], true);
-        let config = VerificationConfig::default();
-
-        // Chain validation fails first (unsupported family), but the report also has debug set
-        let err = snp_chain::verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
-        assert!(matches!(err, QuoteVerifyError::ChainInvalid(_)));
-    }
-
-    #[test]
-    fn snp_tcb_all_zero_rejected_via_chain() {
-        let (vcek_der, signing_key) = self_signed_vcek_cert();
-        let report = build_signed_report(&signing_key, [0, 0, 0, 0], false);
-        let config = VerificationConfig::default();
-
-        let err = snp_chain::verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
-        assert!(matches!(err, QuoteVerifyError::ChainInvalid(_)));
-    }
-
-    #[test]
-    fn snp_sig_and_chain_modules_are_exported() {
-        // Verify the public API surface includes the new types
+    fn snp_chain_types_are_exported() {
         let _config = VerificationConfig::default();
         let _policy = TcbPolicy {
             boot_loader_min: 1,
@@ -542,5 +417,119 @@ mod snp_chain_tests {
         };
         let _family = tee_verifier::ProductFamily::Milan;
         let _family2 = tee_verifier::ProductFamily::Genoa;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SNP report signature verification (snp_sig — direct tests)
+//
+// These exercise the actual policy and signature checks in snp_sig, not
+// through the chain (which requires AMD-signed certs). The unit tests in
+// snp_sig::tests cover the same paths, but these integration tests confirm
+// the public module boundary works correctly.
+// ---------------------------------------------------------------------------
+
+mod snp_sig_tests {
+    use ecdsa::signature::Signer;
+    use p384::ecdsa::{Signature, SigningKey, VerifyingKey};
+    use rand::rngs::OsRng;
+    use tee_verifier::{QuoteVerifyError, snp_sig};
+
+    const SIG_ALGO_OFFSET: usize = 672;
+    const SIG_R_OFFSET: usize = 676;
+    const SIG_S_OFFSET: usize = 748;
+    const SIG_COMPONENT_LEN: usize = 72;
+    const POLICY_OFFSET: usize = 24;
+    const SIGNED_REGION_END: usize = 672;
+
+    fn be_to_le_padded(be_bytes: &[u8], pad_len: usize) -> Vec<u8> {
+        let mut le: Vec<u8> = be_bytes.iter().rev().copied().collect();
+        le.resize(pad_len, 0);
+        le
+    }
+
+    fn build_signed_report(signing_key: &SigningKey, debug: bool, vlek: bool) -> Vec<u8> {
+        let mut report = vec![0u8; 1184];
+        report[0..4].copy_from_slice(&2u32.to_le_bytes());
+
+        let mut policy: u64 = 0;
+        if vlek {
+            policy |= 1 << 2;
+        }
+        if debug {
+            policy |= 1 << 19;
+        }
+        report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
+        report[80..144].copy_from_slice(&[0xAA; 64]);
+        report[144..192].copy_from_slice(&[0xBB; 48]);
+
+        // Sign
+        let signed_region = &report[..SIGNED_REGION_END];
+        let signature: Signature = signing_key.sign(signed_region);
+        report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
+        let sig_bytes = signature.to_bytes();
+        report[SIG_R_OFFSET..SIG_R_OFFSET + SIG_COMPONENT_LEN]
+            .copy_from_slice(&be_to_le_padded(&sig_bytes[..48], SIG_COMPONENT_LEN));
+        report[SIG_S_OFFSET..SIG_S_OFFSET + SIG_COMPONENT_LEN]
+            .copy_from_slice(&be_to_le_padded(&sig_bytes[48..], SIG_COMPONENT_LEN));
+
+        report
+    }
+
+    #[test]
+    fn valid_report_passes() {
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = VerifyingKey::from(&sk);
+        let report = build_signed_report(&sk, false, false);
+        snp_sig::verify_report_signature(&report, &vk).unwrap();
+    }
+
+    #[test]
+    fn tampered_report_rejected() {
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = VerifyingKey::from(&sk);
+        let mut report = build_signed_report(&sk, false, false);
+        report[100] ^= 0xFF;
+        let err = snp_sig::verify_report_signature(&report, &vk).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("signature invalid")
+        ));
+    }
+
+    #[test]
+    fn debug_mode_rejected() {
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = VerifyingKey::from(&sk);
+        let report = build_signed_report(&sk, true, false);
+        let err = snp_sig::verify_report_signature(&report, &vk).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("DEBUG")
+        ));
+    }
+
+    #[test]
+    fn vlek_signer_rejected() {
+        let sk = SigningKey::random(&mut OsRng);
+        let vk = VerifyingKey::from(&sk);
+        let report = build_signed_report(&sk, false, true);
+        let err = snp_sig::verify_report_signature(&report, &vk).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("VLEK")
+        ));
+    }
+
+    #[test]
+    fn wrong_key_rejected() {
+        let sk = SigningKey::random(&mut OsRng);
+        let wrong_vk = VerifyingKey::from(&SigningKey::random(&mut OsRng));
+        let report = build_signed_report(&sk, false, false);
+        let err = snp_sig::verify_report_signature(&report, &wrong_vk).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("signature invalid")
+        ));
     }
 }
