@@ -8,10 +8,13 @@ use receipt_core::{
     InputCommitment, Operator, ReceiptV2, SCHEMA_VERSION_V2, SessionStatus, TeeAttestation,
     TeeType, TokenUsage, UnsignedReceiptV2, sign_and_assemble_receipt_v2,
 };
-use tee_transcript::{TranscriptInputs, compute_transcript_hash};
+use tee_transcript::{
+    TranscriptInputs, TranscriptInputsV2, compute_transcript_hash, compute_transcript_hash_v2,
+};
 use tee_verifier::{
     AttestationHashStatus, AttestationStatus, MeasurementEntry, QuoteVerifyError,
-    SevSnpQuoteVerifier, SimulatedQuoteVerifier, StaticAllowlist, verify_tee_receipt,
+    SevSnpQuoteVerifier, SimulatedQuoteVerifier, StaticAllowlist, TranscriptSchema,
+    verify_tee_receipt,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,6 +65,123 @@ fn build_receipt_with_vcek(
     let initiator_sub_hash = hex::encode(Sha256::digest(b"test-initiator-input"));
     let responder_sub_hash = hex::encode(Sha256::digest(b"test-responder-input"));
 
+    let model_identity_asserted = "test-model";
+    let inputs = TranscriptInputsV2 {
+        contract_hash: &contract_hash,
+        prompt_template_hash: &prompt_template_hash,
+        initiator_submission_hash: &initiator_sub_hash,
+        responder_submission_hash: &responder_sub_hash,
+        output_hash: &output_hash,
+        receipt_signing_pubkey_hex: &pubkey_hex,
+        model_identity_asserted,
+    };
+    let transcript_hash = compute_transcript_hash_v2(&inputs);
+
+    let (quote_bytes, measurement) = quote_builder(&transcript_hash);
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let quote_b64 = b64.encode(&quote_bytes);
+    let attestation_hash = hex::encode(Sha256::digest(&quote_bytes));
+    let user_data_hex = hex::encode(transcript_hash);
+    let transcript_hash_hex = hex::encode(transcript_hash);
+    let operator_key_fingerprint = hex::encode(Sha256::digest(hex::decode(&pubkey_hex).unwrap()));
+
+    let unsigned = UnsignedReceiptV2 {
+        receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
+        receipt_canonicalization: CANONICALIZATION_V2.to_string(),
+        receipt_id: "test-receipt-001".to_string(),
+        session_id: "test-session-001".to_string(),
+        issued_at: chrono::Utc::now(),
+        assurance_level: AssuranceLevel::SelfAsserted,
+        operator: Operator {
+            operator_id: "test-relay".to_string(),
+            operator_key_fingerprint,
+            operator_key_discovery: None,
+        },
+        commitments: Commitments {
+            contract_hash,
+            schema_hash,
+            output_hash,
+            input_commitments: vec![InputCommitment {
+                participant_id: "initiator".to_string(),
+                input_hash: initiator_sub_hash.clone(),
+                hash_alg: HashAlgorithm::Sha256,
+                canonicalization: "CANONICAL_JSON_V1".to_string(),
+            }],
+            assembled_prompt_hash: hex::encode(Sha256::digest(b"test-assembled-prompt")),
+            prompt_assembly_version: "1.0.0".to_string(),
+            output: Some(serde_json::json!({"score": 4})),
+            prompt_template_hash: Some(prompt_template_hash),
+            effective_config_hash: None,
+            preflight_bundle: None,
+            output_retrieval_uri: None,
+            output_media_type: None,
+            preflight_bundle_uri: None,
+            rejected_output_hash: None,
+            initiator_submission_hash: Some(initiator_sub_hash),
+            responder_submission_hash: Some(responder_sub_hash),
+        },
+        claims: Claims {
+            model_identity_asserted: Some(model_identity_asserted.to_string()),
+            model_identity_attested: None,
+            model_profile_hash_asserted: None,
+            runtime_hash_asserted: None,
+            runtime_hash_attested: None,
+            budget_enforcement_mode: Some(BudgetEnforcementMode::Enforced),
+            provider_latency_ms: Some(100),
+            token_usage: Some(TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+            }),
+            relay_software_version: Some("0.1.0".to_string()),
+            status: Some(SessionStatus::Success),
+            signal_class: Some("SESSION_COMPLETED".to_string()),
+            execution_lane: Some(ExecutionLaneV2::Tee),
+            channel_capacity_bits_upper_bound: Some(3),
+            channel_capacity_measurement_version: Some(
+                CHANNEL_CAPACITY_MEASUREMENT_VERSION.to_string(),
+            ),
+            entropy_budget_bits: Some(128),
+            schema_entropy_ceiling_bits: Some(3),
+            budget_usage: Some(BudgetUsageV2 {
+                bits_used_before: 0,
+                bits_used_after: 3,
+                budget_limit: 128,
+            }),
+        },
+        provider_attestation: None,
+        tee_attestation: Some(TeeAttestation {
+            tee_type: Some(TeeType::Simulated),
+            measurement: Some(measurement),
+            quote: Some(quote_b64),
+            attestation_hash: Some(attestation_hash),
+            receipt_signing_pubkey_hex: Some(pubkey_hex),
+            transcript_hash_hex: Some(transcript_hash_hex),
+            user_data_hex: Some(user_data_hex),
+            snp_vcek_cert,
+        }),
+    };
+
+    let receipt = sign_and_assemble_receipt_v2(unsigned, &signing_key).unwrap();
+    (receipt, signing_key)
+}
+
+/// Build a receipt using the v1 transcript hash (no model identity in hash).
+/// Used to test verifier backward compatibility.
+fn build_v1_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
+    let mut rng = rand::thread_rng();
+    let signing_key = SigningKey::generate(&mut rng);
+    let pubkey_hex = receipt_core::public_key_to_hex(&signing_key.verifying_key());
+
+    let contract_hash = hex::encode(Sha256::digest(b"test-contract"));
+    let schema_hash = hex::encode(Sha256::digest(b"test-schema"));
+    let output_hash = hex::encode(Sha256::digest(b"test-output"));
+    let prompt_template_hash = hex::encode(Sha256::digest(b"test-prompt-template"));
+    let initiator_sub_hash = hex::encode(Sha256::digest(b"test-initiator-input"));
+    let responder_sub_hash = hex::encode(Sha256::digest(b"test-responder-input"));
+
+    // Use v1 transcript hash (no model_identity_asserted)
     let inputs = TranscriptInputs {
         contract_hash: &contract_hash,
         prompt_template_hash: &prompt_template_hash,
@@ -84,8 +204,8 @@ fn build_receipt_with_vcek(
     let unsigned = UnsignedReceiptV2 {
         receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
         receipt_canonicalization: CANONICALIZATION_V2.to_string(),
-        receipt_id: "test-receipt-001".to_string(),
-        session_id: "test-session-001".to_string(),
+        receipt_id: "test-receipt-v1-001".to_string(),
+        session_id: "test-session-v1-001".to_string(),
         issued_at: chrono::Utc::now(),
         assurance_level: AssuranceLevel::SelfAsserted,
         operator: Operator {
@@ -154,7 +274,7 @@ fn build_receipt_with_vcek(
             receipt_signing_pubkey_hex: Some(pubkey_hex),
             transcript_hash_hex: Some(transcript_hash_hex),
             user_data_hex: Some(user_data_hex),
-            snp_vcek_cert,
+            snp_vcek_cert: None,
         }),
     };
 
@@ -190,6 +310,33 @@ fn simulated_receipt_full_verification() {
     assert!(result.is_valid_parsed());
     assert!(result.is_valid_sans_quote());
     assert_eq!(result.attestation_status, AttestationStatus::QuoteVerified);
+    assert_eq!(
+        result.transcript_schema,
+        Some(TranscriptSchema::V2),
+        "v2 receipt should report TranscriptSchema::V2"
+    );
+}
+
+#[test]
+fn v1_receipt_verifies_with_fallback() {
+    // Build a receipt using v1 transcript hash (no model_identity_asserted in hash).
+    // Verifier should fall back to v1 and report TranscriptSchema::V1.
+    let (receipt, _key) = build_v1_receipt(simulated_quote_builder());
+    let allowlist = allowlist_with(&simulated_measurement());
+    let verifier = SimulatedQuoteVerifier;
+
+    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+
+    assert!(
+        result.transcript_hash_valid,
+        "v1 transcript hash should verify via fallback"
+    );
+    assert_eq!(
+        result.transcript_schema,
+        Some(TranscriptSchema::V1),
+        "v1 receipt should report TranscriptSchema::V1"
+    );
+    assert!(result.is_valid(), "v1 receipt should still be fully valid");
 }
 
 // ---------------------------------------------------------------------------

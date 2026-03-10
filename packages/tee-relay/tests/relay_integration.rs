@@ -14,7 +14,7 @@ use tee_relay::handlers::{self, RelayState};
 use tee_relay::relay::AppState;
 use tee_relay::session::SessionStore;
 use tee_relay::types::*;
-use tee_transcript::{TranscriptInputs, compute_transcript_hash};
+use tee_transcript::{TranscriptInputsV2, compute_transcript_hash_v2};
 
 /// Start a mock Anthropic API server that returns an HTTP error.
 async fn start_failing_mock_provider(status_code: u16) -> String {
@@ -664,13 +664,19 @@ async fn relay_transcript_hash_matches_recomputed() {
         .as_ref()
         .expect("prompt_template_hash");
 
-    let recomputed = compute_transcript_hash(&TranscriptInputs {
+    let model_identity = receipt
+        .claims
+        .model_identity_asserted
+        .as_deref()
+        .unwrap_or("");
+    let recomputed = compute_transcript_hash_v2(&TranscriptInputsV2 {
         contract_hash: &receipt.commitments.contract_hash,
         prompt_template_hash,
         initiator_submission_hash: &init_ct_hash,
         responder_submission_hash: &resp_ct_hash,
         output_hash,
         receipt_signing_pubkey_hex: &info.receipt_signing_pubkey_hex,
+        model_identity_asserted: model_identity,
     });
 
     assert_eq!(receipt_transcript_hex, &hex::encode(recomputed));
@@ -805,7 +811,7 @@ async fn relay_failure_receipt_on_provider_error() {
         .transcript_hash_hex
         .as_deref()
         .expect("failure receipt transcript hash");
-    let recomputed = compute_transcript_hash(&TranscriptInputs {
+    let recomputed = compute_transcript_hash_v2(&TranscriptInputsV2 {
         contract_hash: &receipt.commitments.contract_hash,
         prompt_template_hash: "",
         initiator_submission_hash: receipt
@@ -823,6 +829,11 @@ async fn relay_failure_receipt_on_provider_error() {
             .receipt_signing_pubkey_hex
             .as_deref()
             .expect("failure receipt signing pubkey"),
+        model_identity_asserted: receipt
+            .claims
+            .model_identity_asserted
+            .as_deref()
+            .unwrap_or(""),
     });
     assert_eq!(receipt_transcript_hex, hex::encode(recomputed));
 }

@@ -10,7 +10,7 @@ use uuid::Uuid;
 use tee_core::attestation::CvmRuntime;
 use tee_core::crypto::{build_aad, decrypt_payload};
 use tee_core::types::ParticipantRole;
-use tee_transcript::{TranscriptInputs, compute_transcript_hash};
+use tee_transcript::{TranscriptInputsV2, compute_transcript_hash_v2};
 
 use crate::session::{Session, SessionStore};
 use crate::types::*;
@@ -268,16 +268,17 @@ async fn build_echo_response(
         hex::encode(h.finalize())
     };
 
-    let transcript_inputs = TranscriptInputs {
+    let transcript_inputs = TranscriptInputsV2 {
         contract_hash: &hex::encode(vec![0u8; 32]),
         prompt_template_hash: "echo-mode-no-template",
         initiator_submission_hash: initiator_sub_hash,
         responder_submission_hash: responder_sub_hash,
         output_hash: &output_hash,
         receipt_signing_pubkey_hex: &state.receipt_signing_pubkey_hex,
+        model_identity_asserted: "",
     };
 
-    let transcript_hash = compute_transcript_hash(&transcript_inputs);
+    let transcript_hash = compute_transcript_hash_v2(&transcript_inputs);
     let transcript_hash_hex = hex::encode(transcript_hash);
 
     let report = state

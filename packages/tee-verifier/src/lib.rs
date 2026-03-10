@@ -16,7 +16,7 @@ pub use quote::{
 };
 pub use result::{
     AttestationHashStatus, AttestationStatus, SignatureStatus, TeeVerificationResult,
-    TranscriptBinding,
+    TranscriptBinding, TranscriptSchema,
 };
 pub use snp_chain::{ProductFamily, TcbPolicy, VerificationConfig};
 pub use verify::{VerifyError, verify_tee_receipt, verify_tee_receipt_with_config};
