@@ -3,13 +3,15 @@ use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
 use receipt_core::ReceiptV2;
-use tee_transcript::{TranscriptInputs, compute_transcript_hash};
+use tee_transcript::{
+    TranscriptInputs, TranscriptInputsV2, compute_transcript_hash, compute_transcript_hash_v2,
+};
 
 use crate::allowlist::TransparencySource;
 use crate::quote::{QuoteVerifier, QuoteVerifyError, cross_check_and_map};
 use crate::result::{
     AttestationHashStatus, AttestationStatus, SignatureStatus, TeeVerificationResult,
-    TranscriptBinding,
+    TranscriptBinding, TranscriptSchema,
 };
 use crate::snp_chain::{self, VerificationConfig};
 
@@ -139,7 +141,10 @@ pub fn verify_tee_receipt_with_config(
     let measurement_match = allowlist.is_allowed(tee_att.measurement.as_deref().unwrap_or(""));
 
     // 4. Recompute transcript hash, compare to user_data_hex
-    let (transcript_hash_valid, transcript_binding) = {
+    //
+    // Try v2 first (model identity bound), then fall back to v1 for legacy
+    // receipts. The `transcript_schema` field tells callers which schema matched.
+    let (transcript_hash_valid, transcript_binding, transcript_schema) = {
         let commitments = &receipt.commitments;
         let contract_hash = commitments.contract_hash.as_str();
         let prompt_template_hash = commitments.prompt_template_hash.as_deref().unwrap_or("");
@@ -153,8 +158,26 @@ pub fn verify_tee_receipt_with_config(
             .unwrap_or("");
         let output_hash = commitments.output_hash.as_str();
         let pubkey_hex = tee_att.receipt_signing_pubkey_hex.as_deref().unwrap_or("");
+        let model_id = receipt
+            .claims
+            .model_identity_asserted
+            .as_deref()
+            .unwrap_or("");
 
-        let inputs = TranscriptInputs {
+        // V2 hash (includes model_identity_asserted)
+        let v2_inputs = TranscriptInputsV2 {
+            contract_hash,
+            prompt_template_hash,
+            initiator_submission_hash: initiator_sub,
+            responder_submission_hash: responder_sub,
+            output_hash,
+            receipt_signing_pubkey_hex: pubkey_hex,
+            model_identity_asserted: model_id,
+        };
+        let v2_hex = hex::encode(compute_transcript_hash_v2(&v2_inputs));
+
+        // V1 hash (legacy, no model identity)
+        let v1_inputs = TranscriptInputs {
             contract_hash,
             prompt_template_hash,
             initiator_submission_hash: initiator_sub,
@@ -162,23 +185,53 @@ pub fn verify_tee_receipt_with_config(
             output_hash,
             receipt_signing_pubkey_hex: pubkey_hex,
         };
-        let computed = compute_transcript_hash(&inputs);
-        let computed_hex = hex::encode(computed);
+        let v1_hex = hex::encode(compute_transcript_hash(&v1_inputs));
 
         // Compare against user_data_hex (the platform attestation binding),
         // falling back to transcript_hash_hex with explicit tracking of which
         // field was used so callers can distinguish assurance levels.
-        let (hash_valid, binding) = match &tee_att.user_data_hex {
-            Some(user_data) => (computed_hex == *user_data, TranscriptBinding::UserData),
+        //
+        // Within each binding target, try v2 first then v1.
+        let (hash_valid, binding, schema) = match &tee_att.user_data_hex {
+            Some(user_data) => {
+                if v2_hex == *user_data {
+                    (
+                        true,
+                        TranscriptBinding::UserData,
+                        Some(TranscriptSchema::V2),
+                    )
+                } else if v1_hex == *user_data {
+                    (
+                        true,
+                        TranscriptBinding::UserData,
+                        Some(TranscriptSchema::V1),
+                    )
+                } else {
+                    (false, TranscriptBinding::UserData, None)
+                }
+            }
             None => match &tee_att.transcript_hash_hex {
-                Some(th) => (
-                    computed_hex == *th,
-                    TranscriptBinding::TranscriptHashFallback,
-                ),
-                None => (false, TranscriptBinding::None),
+                Some(th) => {
+                    if v2_hex == *th {
+                        (
+                            true,
+                            TranscriptBinding::TranscriptHashFallback,
+                            Some(TranscriptSchema::V2),
+                        )
+                    } else if v1_hex == *th {
+                        (
+                            true,
+                            TranscriptBinding::TranscriptHashFallback,
+                            Some(TranscriptSchema::V1),
+                        )
+                    } else {
+                        (false, TranscriptBinding::TranscriptHashFallback, None)
+                    }
+                }
+                None => (false, TranscriptBinding::None, None),
             },
         };
-        (hash_valid, binding)
+        (hash_valid, binding, schema)
     };
 
     // 5. Check submission hashes present
@@ -192,6 +245,7 @@ pub fn verify_tee_receipt_with_config(
         attestation_hash_status,
         transcript_hash_valid,
         transcript_binding,
+        transcript_schema,
         submission_hashes_present,
     })
 }

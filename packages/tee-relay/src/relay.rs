@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use tee_core::attestation::CvmRuntime;
-use tee_transcript::{TranscriptInputs, compute_transcript_hash};
+use tee_transcript::{TranscriptInputsV2, compute_transcript_hash_v2};
 
 use crate::error::RelayError;
 use crate::provider::ProviderRequest;
@@ -325,16 +325,20 @@ async fn build_tee_receipt_v2(
     let receipt_signing_pubkey_hex =
         receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
 
-    // Build transcript hash for attestation binding
-    let transcript_inputs = TranscriptInputs {
+    // Compute model identity once — used for both transcript binding and claims
+    let model_identity_asserted = format!("anthropic/{model_id}");
+
+    // Build transcript hash for attestation binding (v2: includes model identity)
+    let transcript_inputs = TranscriptInputsV2 {
         contract_hash,
         prompt_template_hash,
         initiator_submission_hash,
         responder_submission_hash,
         output_hash,
         receipt_signing_pubkey_hex: &receipt_signing_pubkey_hex,
+        model_identity_asserted: &model_identity_asserted,
     };
-    let transcript_hash = compute_transcript_hash(&transcript_inputs);
+    let transcript_hash = compute_transcript_hash_v2(&transcript_inputs);
     let transcript_hash_hex = hex::encode(transcript_hash);
 
     // Get CVM attestation bound to transcript hash
@@ -409,7 +413,7 @@ async fn build_tee_receipt_v2(
             responder_submission_hash: Some(responder_submission_hash.to_string()),
         },
         claims: Claims {
-            model_identity_asserted: Some(format!("anthropic/{model_id}")),
+            model_identity_asserted: Some(model_identity_asserted),
             model_identity_attested: None,
             model_profile_hash_asserted: None,
             runtime_hash_asserted: None,
@@ -469,15 +473,16 @@ pub async fn build_failure_receipt_v2(
     let missing_field = "";
     let empty_hash = hex::encode(Sha256::digest(b""));
 
-    let transcript_inputs = TranscriptInputs {
+    let transcript_inputs = TranscriptInputsV2 {
         contract_hash,
         prompt_template_hash: missing_field,
         initiator_submission_hash: initiator_submission_hash.unwrap_or(missing_field),
         responder_submission_hash: responder_submission_hash.unwrap_or(missing_field),
         output_hash: &empty_hash,
         receipt_signing_pubkey_hex: &receipt_signing_pubkey_hex,
+        model_identity_asserted: missing_field,
     };
-    let transcript_hash = compute_transcript_hash(&transcript_inputs);
+    let transcript_hash = compute_transcript_hash_v2(&transcript_inputs);
     let transcript_hash_hex = hex::encode(transcript_hash);
 
     let report = state

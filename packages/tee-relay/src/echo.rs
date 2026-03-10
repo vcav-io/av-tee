@@ -268,6 +268,9 @@ async fn build_echo_response(
         hex::encode(h.finalize())
     };
 
+    // Echo mode stays on v1 transcript hash: there is no model invocation,
+    // and EchoTeeAttestation has no transcript version field, so switching
+    // to v2 would silently break consumers.
     let transcript_inputs = TranscriptInputs {
         contract_hash: &hex::encode(vec![0u8; 32]),
         prompt_template_hash: "echo-mode-no-template",
