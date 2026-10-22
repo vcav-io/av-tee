@@ -43,6 +43,9 @@ jobs:
       - name: Check SEV-SNP build
         run: cargo check -p tee-relay --features snp
 
+      - name: Clippy (SEV-SNP build)
+        run: cargo clippy -p tee-relay -p tee-snp --features tee-relay/snp --all-targets -- -D warnings
+
       - name: Test
         run: cargo test --workspace
 

@@ -16,8 +16,9 @@ SELKEY_ALLOW_SIMULATED=1 ANTHROPIC_API_KEY=sk-... cargo run -p tee-relay
 ## Docker
 
 ```bash
-# Build and run with docker-compose (simulated runtime, published on 127.0.0.1:3100)
-docker compose -f docker-compose.tee.yml up --build
+# Build and run with docker-compose (simulated runtime, published on 127.0.0.1:3100).
+# Relay mode needs ANTHROPIC_API_KEY in the host environment; compose passes it through.
+ANTHROPIC_API_KEY=sk-... docker compose -f docker-compose.tee.yml up --build
 
 # Or use the build script for reproducible builds
 bash scripts/build-enclave.sh

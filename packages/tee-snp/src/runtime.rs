@@ -32,7 +32,10 @@ const SEAL_HEADER_LEN: usize = 14 + 1 + 1 + SEAL_TCB_FLOOR_LEN + 12;
 /// Whether every TCB component of `floor` is at or below `committed`.
 ///
 /// Milan/Genoa TCB_VERSION layout (little-endian bytes): boot loader [0],
-/// TEE [1], SNP [6], microcode [7].
+/// TEE [1], SNP [6], microcode [7]. Turin uses a different layout (FMC [0],
+/// boot loader [1], TEE [2], SNP [3], microcode [7]); on Turin this compares
+/// the wrong bytes, so Turin is not supported (see `tee-verifier`, which
+/// also accepts only Milan and Genoa).
 fn tcb_at_least(committed: u64, floor: u64) -> bool {
     let c = committed.to_le_bytes();
     let f = floor.to_le_bytes();

@@ -17,7 +17,11 @@ RUN SELKEY_TEE_GIT_REV="${SELKEY_TEE_GIT_REV}" \
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
-RUN useradd --system --no-create-home selkeytee
+# The data directory must belong to the relay user before VOLUME, so a fresh
+# named volume is created with that ownership and the sealed key can be written.
+RUN useradd --system --no-create-home selkeytee && \
+    mkdir -p /var/lib/selkey-tee && \
+    chown selkeytee:selkeytee /var/lib/selkey-tee
 USER selkeytee
 COPY --from=builder /build/target/release/tee-relay /usr/local/bin/tee-relay
 VOLUME ["/var/lib/selkey-tee"]
