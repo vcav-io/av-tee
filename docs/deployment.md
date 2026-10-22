@@ -81,7 +81,7 @@ be unsealed under the new policy. On the first start after upgrading:
 2. The receipt signing key changes. Don't take the new key from `GET /tee/info` alone: that
    endpoint is unauthenticated. Take it from a receipt issued after the restart whose attestation
    verifies with `is_valid()` when the key named in its `tee_attestation` is pinned and
-   `VerifyOptions::relay_config` is set, so only a v3 transcript counts (chain-verified quote,
+   `VerifyOptions::relay_config` is set (only a v3 transcript counts; chain-verified quote,
    DEBUG off, allowlisted measurement, transcript binding the key), and compare that key with
    the key in the relay's startup log. Then update every client and verifier that pins it (for
    example `relay_verifying_key_hex` in contracts and `VerifyOptions::pinned_receipt_key`).
@@ -125,8 +125,11 @@ networked step; nothing in this repo fetches them.
 ## Verifying receipts
 
 Use `tee_verifier::verify_tee_receipt_pinned` (or `VerifyOptions::pinned_receipt_key`) with the
-relay key from your configuration. Without a pinned key the signature status is
-`ValidUnpinned` and no `is_valid*` method accepts the result. `tee_attestation.tee_type` must
+relay key from your configuration, and pass the relay configuration (`relay_config`, or
+`VerifyOptions::relay_config`). Without a pinned key the signature status is
+`ValidUnpinned` and no `is_valid*` method accepts the result. Only a v3 transcript counts by
+default, and it verifies only against the relay configuration, so without one no `is_valid*`
+method accepts the result either (v1/v2 receipts need `VerifyOptions::allow_legacy_transcripts`). `tee_attestation.tee_type` must
 match the quote verifier's platform, and a simulated quote is reported as `QuoteSimulated`,
 never as verified. Parse v3 receipts with `receipt_core::parse_receipt_v3_strict` before passing
 them to `TeeReceipt::V3`.

@@ -4,6 +4,13 @@
 
 ### Changed
 
+- `tee-verifier` requires a v3 transcript by default. v1 and v2 (legacy) transcript matches are
+  still reported in `transcript_schema` but don't count as valid unless the caller sets the new
+  `VerifyOptions::allow_legacy_transcripts` and supplies no relay config. This replaces
+  `VerifyOptions::require_transcript_v3`, which is removed. Since a v3 transcript verifies only
+  against a caller-supplied relay config, verifiers must now pass `relay_config` (or opt in to
+  legacy transcripts) for any receipt to be valid.
+
 - TEE lane parity with the Selkey relay:
   - `POST /sessions` checks contract support before any input is submitted (prompt template,
     relay key pin, model profile and constraints, output schema, entropy budget) and answers
@@ -82,9 +89,9 @@
     `transcript_version`, `relay_config` and `relay_config_hash`.
   - `tee-verifier` verifies v3 transcripts when the caller supplies the relay configuration
     (`verify_tee_receipt_with_options`, `VerifyOptions::relay_config`), and returns the matched
-    configuration. v1 and v2 transcripts still verify and are labelled "code/config unbound",
-    except when a relay config is supplied (or `require_transcript_v3` is set), where they are
-    invalid. A v3 match is labelled "relay config asserted (not code-attested)".
+    configuration. v1 and v2 transcripts are labelled "code/config unbound" and count as
+    valid only with `VerifyOptions::allow_legacy_transcripts` and no relay config (see
+    above). A v3 match is labelled "relay config asserted (not code-attested)".
   - `ANTHROPIC_BASE_URL` with user info, a query or a fragment stops startup.
   - Golden vectors, including pairs of inputs with quote and delimiter characters that collide
     under the v2 encoding: `tests/fixtures/transcript_v3_golden.json`.

@@ -117,13 +117,17 @@ pub struct VerifyOptions {
     /// is returned in [`TeeVerificationResult::relay_config`], so the caller
     /// can apply its own policy to it.
     ///
-    /// Supplying a relay config also requires transcript v3: a v1 or v2
-    /// transcript match is then reported as invalid, so a receipt cannot
-    /// avoid the configuration check by carrying a legacy transcript.
+    /// Only a v3 transcript counts as valid unless
+    /// [`Self::allow_legacy_transcripts`] is set, so without a relay config
+    /// no transcript verifies by default.
     pub relay_config: Option<RelayConfig>,
-    /// Require a v3 transcript even without a relay config (in which case
-    /// no transcript can verify). Implied when `relay_config` is set.
-    pub require_transcript_v3: bool,
+    /// Also accept a v1 or v2 (legacy) transcript match as valid. Off by
+    /// default: legacy transcripts interpolate values without escaping, so
+    /// different commitments can produce the same transcript. Ignored when
+    /// `relay_config` is set, so a receipt cannot avoid the configuration
+    /// check by carrying a legacy transcript. Legacy matches are reported in
+    /// [`TeeVerificationResult::transcript_schema`] either way.
+    pub allow_legacy_transcripts: bool,
     /// The relay's receipt signing key, from the caller's configuration.
     ///
     /// The receipt signature is checked against this key, and
@@ -136,6 +140,12 @@ pub struct VerifyOptions {
 }
 
 /// Verify a receipt against a pinned relay key (the usual entry point).
+///
+/// Pass the relay configuration (`relay_config`) for a valid result: only a
+/// v3 transcript counts by default, and it verifies only against the
+/// configuration. With `None` no `is_valid*` method accepts the result,
+/// unless legacy transcripts are allowed through
+/// [`verify_tee_receipt_with_options`].
 pub fn verify_tee_receipt_pinned<'a>(
     receipt: impl Into<TeeReceipt<'a>>,
     pinned_receipt_key: &VerifyingKey,
@@ -336,10 +346,10 @@ pub fn verify_tee_receipt_with_options<'a>(
     //
     // Try v3 (relay config bound; needs the caller-supplied relay config),
     // then v2 (model identity bound), then v1. v1 and v2 are legacy
-    // encodings kept so receipts issued before v3 still verify; they bind
-    // neither relay code nor relay configuration, and they do not count as
-    // valid when the caller supplied a relay config or required v3.
-    // `transcript_schema` still reports which encoding matched.
+    // encodings; they bind neither relay code nor relay configuration, and
+    // they count as valid only when the caller sets allow_legacy_transcripts
+    // and supplies no relay config. `transcript_schema` still reports which
+    // encoding matched.
     let (transcript_hash_valid, transcript_binding, transcript_schema) = {
         let contract_hash = fields.contract_hash;
         let prompt_template_hash = fields.prompt_template_hash.unwrap_or("");
@@ -402,12 +412,13 @@ pub fn verify_tee_receipt_with_options<'a>(
             (None, Some(th)) => (TranscriptBinding::TranscriptHashFallback, schema_for(th)),
             (None, None) => (TranscriptBinding::None, None),
         };
-        // With a relay config (or an explicit requirement), only v3 counts:
-        // a legacy transcript would skip the configuration check.
-        let v3_required = options.require_transcript_v3 || options.relay_config.is_some();
+        // Only v3 counts unless the caller opts in to legacy transcripts,
+        // and never with a relay config: a legacy transcript would skip the
+        // configuration check.
+        let legacy_allowed = options.allow_legacy_transcripts && options.relay_config.is_none();
         let valid = match schema {
             Some(TranscriptSchema::V3) => true,
-            Some(_) => !v3_required,
+            Some(_) => legacy_allowed,
             None => false,
         };
         (valid, binding, schema)
