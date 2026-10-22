@@ -7,11 +7,11 @@ services:
       - "3100:3100"
     environment:
       - RUST_LOG=info
-      - AV_TEE_DATA_DIR=/var/lib/av-tee
+      - SELKEY_TEE_DATA_DIR=/var/lib/selkey-tee
       # Standard relay mode by default. For echo testing:
-      # - AV_TEE_ECHO_MODE=true
+      # - SELKEY_TEE_ECHO_MODE=true
     volumes:
-      - tee-data:/var/lib/av-tee
+      - tee-data:/var/lib/selkey-tee
 
 volumes:
   tee-data:

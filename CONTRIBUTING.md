@@ -1,4 +1,4 @@
-# Contributing to av-tee
+# Contributing to selkey-tee
 
 ## Prerequisites
 

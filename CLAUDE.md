@@ -1,6 +1,6 @@
-# AgentVault-TEE
+# selkey-tee
 
-Confidential execution lane for the AgentVault relay. Runs inside an AMD SEV-SNP
+Confidential execution lane for the Selkey relay. Runs inside an AMD SEV-SNP
 Confidential VM with remote attestation and encrypted ingress.
 
 ## Trust boundary
@@ -22,7 +22,7 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Requires Rust 1.88.0+ (pinned in `rust-toolchain.toml` to match av-claude).
+Requires Rust 1.88.0+ (pinned in `rust-toolchain.toml` to match the [Selkey](https://github.com/vcav-io/selkey) relay).
 
 ## Packages
 

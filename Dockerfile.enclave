@@ -10,10 +10,10 @@ RUN cargo build --release -p tee-relay
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
-RUN useradd --system --no-create-home avtee
-USER avtee
+RUN useradd --system --no-create-home selkeytee
+USER selkeytee
 COPY --from=builder /build/target/release/tee-relay /usr/local/bin/tee-relay
-VOLUME ["/var/lib/av-tee"]
-ENV AV_TEE_DATA_DIR=/var/lib/av-tee
+VOLUME ["/var/lib/selkey-tee"]
+ENV SELKEY_TEE_DATA_DIR=/var/lib/selkey-tee
 EXPOSE 3100
 ENTRYPOINT ["tee-relay"]

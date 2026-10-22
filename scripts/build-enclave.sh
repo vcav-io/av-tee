@@ -7,7 +7,7 @@ set -euo pipefail
 # It is NOT the SNP measurement. Reproducible SNP measurement requires
 # platform-specific tooling not yet integrated.
 
-IMAGE_NAME="${IMAGE_NAME:-av-tee-relay}"
+IMAGE_NAME="${IMAGE_NAME:-selkey-tee-relay}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
 
 echo "Building enclave image: ${IMAGE_NAME}:${IMAGE_TAG}"

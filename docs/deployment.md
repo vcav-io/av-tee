@@ -4,7 +4,7 @@
 
 ```bash
 # Echo mode (no API key needed)
-AV_TEE_ECHO_MODE=true cargo run -p tee-relay
+SELKEY_TEE_ECHO_MODE=true cargo run -p tee-relay
 
 # Relay mode (needs Anthropic API key)
 ANTHROPIC_API_KEY=sk-... cargo run -p tee-relay
@@ -24,16 +24,16 @@ bash scripts/build-enclave.sh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AV_TEE_ECHO_MODE` | `false` | Enable echo mode (no LLM calls) |
-| `AV_TEE_DATA_DIR` | `/tmp/av-tee` | Directory for sealed signing key |
-| `AV_SIGNING_KEY_HEX` | (auto) | Override signing key (dev only) |
+| `SELKEY_TEE_ECHO_MODE` | `false` | Enable echo mode (no LLM calls) |
+| `SELKEY_TEE_DATA_DIR` | `/tmp/selkey-tee` | Directory for sealed signing key |
+| `SELKEY_SIGNING_KEY_HEX` | (auto) | Override signing key (dev only) |
 | `ANTHROPIC_API_KEY` | (none) | Anthropic API key for relay mode |
-| `AV_MODEL_ID` | `claude-sonnet-4-5-20250929` | Model to use |
+| `SELKEY_MODEL_ID` | `claude-sonnet-4-5-20250929` | Model to use |
 | `ANTHROPIC_BASE_URL` | (default) | Custom API base URL |
-| `AV_MAX_COMPLETION_TOKENS` | `4096` | Max completion tokens |
-| `AV_OPERATOR_ID` | `av-tee-relay-dev` | Operator identifier in receipts |
-| `AV_SESSION_TTL_SECS` | `600` | Session timeout in seconds |
-| `AV_PORT` | `3100` | HTTP port to bind |
+| `SELKEY_MAX_COMPLETION_TOKENS` | `4096` | Max completion tokens |
+| `SELKEY_OPERATOR_ID` | `selkey-tee-relay-dev` | Operator identifier in receipts |
+| `SELKEY_SESSION_TTL_SECS` | `600` | Session timeout in seconds |
+| `SELKEY_PORT` | `3100` | HTTP port to bind |
 | `RUST_LOG` | `info` | Log level filter |
 
 ## Verifying a deployment
