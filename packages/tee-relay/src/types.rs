@@ -107,8 +107,11 @@ pub struct SessionOutputResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EchoResponse {
     pub session_id: String,
-    pub initiator_decrypted_sha256_hex: String,
-    pub responder_decrypted_sha256_hex: String,
+    /// v3 input commitment (`SHA256_N32_JCS_V3`) to the initiator's decrypted
+    /// input. Each party checks its own entry with its nonce and context.
+    pub initiator_input_commitment: String,
+    /// v3 input commitment to the responder's decrypted input.
+    pub responder_input_commitment: String,
     pub tee_attestation: EchoTeeAttestation,
 }
 

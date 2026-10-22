@@ -171,6 +171,10 @@ pub async fn submit_input(
             )
             .map_err(|_| ())?;
 
+            // Same plaintext format as the relay: role, context and a
+            // well-formed commitment_nonce.
+            crate::relay::parse_decrypted_input(plaintext.as_slice()).map_err(|_| ())?;
+
             session.mark_submitted(role);
             match role {
                 ParticipantRole::Initiator => {
@@ -219,6 +223,7 @@ enum EchoError {
     SessionNotFound,
     MissingInput(&'static str),
     MissingSubmissionHash(&'static str),
+    InvalidInput,
     AttestationFailed(String),
 }
 
@@ -241,16 +246,16 @@ async fn build_echo_response(
         .as_ref()
         .ok_or(EchoError::MissingInput("responder"))?;
 
-    let initiator_hash = {
-        let mut h = Sha256::new();
-        h.update(initiator_input.as_slice());
-        hex::encode(h.finalize())
+    // Salted v3 commitments to the decrypted inputs. No unsalted hash of a
+    // plaintext is returned or bound into the transcript.
+    let commitment = |plaintext: &[u8]| {
+        let input =
+            crate::relay::parse_decrypted_input(plaintext).map_err(|_| EchoError::InvalidInput)?;
+        receipt_core::compute_input_commitment_v3(input.commitment_nonce.as_bytes(), &input.context)
+            .map_err(|_| EchoError::InvalidInput)
     };
-    let responder_hash = {
-        let mut h = Sha256::new();
-        h.update(responder_input.as_slice());
-        hex::encode(h.finalize())
-    };
+    let initiator_commitment = commitment(initiator_input.as_slice())?;
+    let responder_commitment = commitment(responder_input.as_slice())?;
 
     let initiator_sub_hash = session
         .initiator_ciphertext_hash
@@ -263,8 +268,8 @@ async fn build_echo_response(
 
     let output_hash = {
         let mut h = Sha256::new();
-        h.update(initiator_hash.as_bytes());
-        h.update(responder_hash.as_bytes());
+        h.update(initiator_commitment.as_bytes());
+        h.update(responder_commitment.as_bytes());
         hex::encode(h.finalize())
     };
 
@@ -297,8 +302,8 @@ async fn build_echo_response(
 
     Ok(EchoResponse {
         session_id: session_id.to_string(),
-        initiator_decrypted_sha256_hex: initiator_hash,
-        responder_decrypted_sha256_hex: responder_hash,
+        initiator_input_commitment: initiator_commitment,
+        responder_input_commitment: responder_commitment,
         tee_attestation: EchoTeeAttestation {
             tee_type: serde_json::to_value(report.tee_type)
                 .ok()

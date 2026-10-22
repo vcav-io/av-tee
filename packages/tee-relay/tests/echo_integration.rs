@@ -111,7 +111,11 @@ async fn full_echo_roundtrip() {
         .unwrap();
 
     // 3. Submit initiator input (encrypted)
-    let init_plaintext = b"initiator secret data";
+    let init_plaintext = &echo_plaintext(
+        "initiator",
+        serde_json::json!({"data": "initiator secret data"}),
+        Some(INIT_NONCE),
+    );
     let init_req = submit_encrypted_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -128,7 +132,11 @@ async fn full_echo_roundtrip() {
     assert_eq!(resp.status(), 202);
 
     // 4. Submit responder input (encrypted)
-    let resp_plaintext = b"responder secret data";
+    let resp_plaintext = &echo_plaintext(
+        "responder",
+        serde_json::json!({"data": "responder secret data"}),
+        Some(RESP_NONCE),
+    );
     let resp_req = submit_encrypted_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -146,11 +154,24 @@ async fn full_echo_roundtrip() {
 
     let echo: EchoResponse = echo_resp.json().await.unwrap();
 
-    // 5. Verify echo response contains hashes, not plaintext
-    let expected_init_hash = hex::encode(Sha256::digest(init_plaintext));
-    let expected_resp_hash = hex::encode(Sha256::digest(resp_plaintext));
-    assert_eq!(echo.initiator_decrypted_sha256_hex, expected_init_hash);
-    assert_eq!(echo.responder_decrypted_sha256_hex, expected_resp_hash);
+    // 5. Verify echo response contains salted commitments, not plaintext
+    let nonce = |h: &str| -> [u8; 32] { hex::decode(h).unwrap().try_into().unwrap() };
+    assert_eq!(
+        echo.initiator_input_commitment,
+        receipt_core::compute_input_commitment_v3(
+            &nonce(INIT_NONCE),
+            &serde_json::json!({"data": "initiator secret data"})
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        echo.responder_input_commitment,
+        receipt_core::compute_input_commitment_v3(
+            &nonce(RESP_NONCE),
+            &serde_json::json!({"data": "responder secret data"})
+        )
+        .unwrap()
+    );
 
     // 6. Verify TEE attestation fields
     assert_eq!(echo.tee_attestation.tee_type, "Simulated");
@@ -184,7 +205,7 @@ async fn duplicate_submission_returns_422() {
         &tee_pubkey_bytes,
         &session.session_id,
         ParticipantRole::Initiator,
-        b"first",
+        &echo_plaintext("initiator", serde_json::json!({}), Some(INIT_NONCE)),
     );
 
     let resp = client
@@ -199,7 +220,7 @@ async fn duplicate_submission_returns_422() {
         &tee_pubkey_bytes,
         &session.session_id,
         ParticipantRole::Initiator,
-        b"second attempt",
+        &echo_plaintext("initiator", serde_json::json!({"n": 2}), Some(INIT_NONCE)),
     );
     let resp2 = client
         .post(format!("{base}/sessions/{}/input", session.session_id))
@@ -234,4 +255,133 @@ async fn each_session_gets_unique_keypair() {
 
     assert_ne!(s1.tee_session_pubkey, s2.tee_session_pubkey);
     assert_ne!(s1.session_id, s2.session_id);
+}
+
+const INIT_NONCE: &str = "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f";
+const RESP_NONCE: &str = "2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e";
+
+fn echo_plaintext(role: &str, context: serde_json::Value, nonce: Option<&str>) -> Vec<u8> {
+    let mut v = serde_json::json!({"role": role, "context": context});
+    if let Some(n) = nonce {
+        v["commitment_nonce"] = serde_json::json!(n);
+    }
+    serde_json::to_vec(&v).unwrap()
+}
+
+async fn echo_session(
+    client: &reqwest::Client,
+    base: &str,
+) -> (EchoCreateSessionResponse, [u8; 32]) {
+    let session: EchoCreateSessionResponse = client
+        .post(format!("{base}/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tee_pubkey_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(&session.tee_session_pubkey)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    (session, tee_pubkey_bytes)
+}
+
+#[tokio::test]
+async fn echo_returns_salted_input_commitments_only() {
+    let base = start_server().await;
+    let client = reqwest::Client::new();
+    let (session, tee_pub) = echo_session(&client, &base).await;
+
+    let init_ctx = serde_json::json!({"offer": 10});
+    let resp_ctx = serde_json::json!({"offer": 12});
+    let init_pt = echo_plaintext("initiator", init_ctx.clone(), Some(INIT_NONCE));
+    let resp_pt = echo_plaintext("responder", resp_ctx.clone(), Some(RESP_NONCE));
+
+    let req = submit_encrypted_input(
+        &tee_pub,
+        &session.session_id,
+        ParticipantRole::Initiator,
+        &init_pt,
+    );
+    let resp = client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let req = submit_encrypted_input(
+        &tee_pub,
+        &session.session_id,
+        ParticipantRole::Responder,
+        &resp_pt,
+    );
+    let resp = client
+        .post(format!("{base}/sessions/{}/input", session.session_id))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    let echo: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+    let nonce = |h: &str| -> [u8; 32] { hex::decode(h).unwrap().try_into().unwrap() };
+    assert_eq!(
+        echo["initiator_input_commitment"],
+        receipt_core::compute_input_commitment_v3(&nonce(INIT_NONCE), &init_ctx).unwrap()
+    );
+    assert_eq!(
+        echo["responder_input_commitment"],
+        receipt_core::compute_input_commitment_v3(&nonce(RESP_NONCE), &resp_ctx).unwrap()
+    );
+
+    // No unsalted hash of either plaintext (or its context) is returned.
+    for unsalted in [
+        hex::encode(Sha256::digest(&init_pt)),
+        hex::encode(Sha256::digest(&resp_pt)),
+        hex::encode(Sha256::digest(
+            receipt_core::canonicalize_v3(&init_ctx).unwrap(),
+        )),
+        hex::encode(Sha256::digest(
+            receipt_core::canonicalize_v3(&resp_ctx).unwrap(),
+        )),
+    ] {
+        assert!(
+            !body.contains(&unsalted),
+            "unsalted input hash in echo response"
+        );
+    }
+    assert!(echo.get("initiator_decrypted_sha256_hex").is_none());
+    assert!(echo.get("responder_decrypted_sha256_hex").is_none());
+    assert!(!body.contains(INIT_NONCE) && !body.contains(RESP_NONCE));
+}
+
+#[tokio::test]
+async fn echo_submission_without_commitment_nonce_is_rejected() {
+    let base = start_server().await;
+    let client = reqwest::Client::new();
+    let (session, tee_pub) = echo_session(&client, &base).await;
+
+    for plaintext in [
+        echo_plaintext("initiator", serde_json::json!({}), None),
+        echo_plaintext("initiator", serde_json::json!({}), Some("ABCD")),
+        b"not json".to_vec(),
+    ] {
+        let req = submit_encrypted_input(
+            &tee_pub,
+            &session.session_id,
+            ParticipantRole::Initiator,
+            &plaintext,
+        );
+        let resp = client
+            .post(format!("{base}/sessions/{}/input", session.session_id))
+            .json(&req)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 422);
+    }
 }
