@@ -1243,12 +1243,42 @@ fn v3_receipt_with_legacy_v2_transcript_verifies_labelled_unbound() {
     );
     let allowlist = allowlist_with(&simulated_measurement());
 
-    // With or without a relay config, a v2 transcript matches as v2.
-    let pinned_only = VerifyOptions {
+    // Without a relay config, a v2 transcript verifies as v2, labelled unbound.
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist,
+        &SimulatedQuoteVerifier,
+        &VerifyOptions {
+            pinned_receipt_key: Some(signing_key.verifying_key()),
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(result.transcript_hash_valid);
+    let schema = result.transcript_schema.expect("schema");
+    assert_eq!(schema, TranscriptSchema::V2);
+    assert!(!schema.binds_relay_config());
+    assert_eq!(schema.label(), "code/config unbound");
+    assert_eq!(result.relay_config, None);
+}
+
+#[test]
+fn legacy_transcript_does_not_verify_when_a_relay_config_is_supplied() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt_with_transcript(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+        None,
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let explicit = VerifyOptions {
+        require_transcript_v3: true,
         pinned_receipt_key: Some(signing_key.verifying_key()),
         ..VerifyOptions::default()
     };
-    for options in [pinned_only, options_with(test_relay_config())] {
+    for options in [options_with(test_relay_config()), explicit] {
         let result = verify_tee_receipt_with_options(
             &receipt,
             &allowlist,
@@ -1256,13 +1286,42 @@ fn v3_receipt_with_legacy_v2_transcript_verifies_labelled_unbound() {
             &options,
         )
         .unwrap();
-        assert!(result.transcript_hash_valid);
-        let schema = result.transcript_schema.expect("schema");
-        assert_eq!(schema, TranscriptSchema::V2);
-        assert!(!schema.binds_relay_config());
-        assert_eq!(schema.label(), "code/config unbound");
+        // The v2 match is reported, but it is not a valid transcript here.
+        assert_eq!(result.transcript_schema, Some(TranscriptSchema::V2));
+        assert!(!result.transcript_hash_valid);
+        assert!(!result.is_valid_sans_quote());
         assert_eq!(result.relay_config, None);
     }
+}
+
+#[test]
+fn relay_config_claim_depends_on_what_the_measurement_covers() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+    );
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist_with(&simulated_measurement()),
+        &SimulatedQuoteVerifier,
+        &options_with(test_relay_config()),
+    )
+    .unwrap();
+    assert!(result.transcript_hash_valid);
+    assert_eq!(
+        result.relay_config_claim(),
+        Some("relay config asserted (not code-attested)")
+    );
+}
+
+#[test]
+fn v3_label_does_not_claim_code_attestation() {
+    assert_eq!(
+        TranscriptSchema::V3.label(),
+        "relay config asserted (not code-attested)"
+    );
 }
 
 #[test]

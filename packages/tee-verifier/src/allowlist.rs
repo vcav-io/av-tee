@@ -13,14 +13,19 @@ pub enum MeasurementPlatform {
     /// endorsements (`gcetcbendorsement`); see docs/deployment.md.
     GcpSnpOvmf,
     /// SEV-SNP direct boot with kernel, initrd and command line hashes in the
-    /// launch measurement (self-hosted).
+    /// launch measurement (self-hosted). This covers the relay code only if
+    /// the measured command line carries a dm-verity root hash for a root
+    /// filesystem that contains the relay; use this platform only for such
+    /// images.
     SnpDirectBoot,
     /// The simulated runtime (development and tests only).
     Simulated,
 }
 
 impl MeasurementPlatform {
-    /// Whether a match shows which relay code ran.
+    /// Whether a match shows which relay code ran. For `SnpDirectBoot` this
+    /// relies on the entry describing an image whose measured command line
+    /// pins a dm-verity root filesystem containing the relay.
     pub fn covers_relay_code(&self) -> bool {
         matches!(self, MeasurementPlatform::SnpDirectBoot)
     }
@@ -32,7 +37,8 @@ impl MeasurementPlatform {
                 "genuine GCP SNP VM running Google-endorsed firmware; relay code not measured"
             }
             MeasurementPlatform::SnpDirectBoot => {
-                "SNP VM launched with the allowlisted kernel, initrd and command line"
+                "SNP VM launched with the allowlisted kernel, initrd and command line \
+                 (relay code covered via the dm-verity root hash on the command line)"
             }
             MeasurementPlatform::Simulated => "simulated runtime; no hardware isolation",
             MeasurementPlatform::Unspecified => "allowlisted measurement; coverage not stated",

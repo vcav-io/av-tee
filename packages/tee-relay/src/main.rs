@@ -77,7 +77,9 @@ async fn load_sealed_signing_key(cvm: &dyn CvmRuntime) -> ed25519_dalek::Signing
 
     let data_dir =
         std::env::var("SELKEY_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/selkey-tee".to_string()); // SAFETY: no plaintext
-    let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
+    let sealed_path = std::path::PathBuf::from(data_dir).join(
+        tee_relay::key_lifecycle::sealed_key_file_name(cvm.identity().tee_type),
+    );
     let policy =
         UnsealFailurePolicy::from_env_value(std::env::var("SELKEY_SEAL_STRICT").ok().as_deref());
     let loaded = load_signing_key(cvm, &sealed_path, policy)
@@ -202,6 +204,12 @@ async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::Si
     let anthropic_model_id = std::env::var("SELKEY_MODEL_ID")
         .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
     let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+    if let Some(url) = anthropic_base_url.as_deref()
+        && let Err(e) = tee_relay::provider::anthropic::validate_base_url(url)
+    {
+        // The message names the problem, never the URL.
+        exit_startup(&format!("{e}; refusing to start"));
+    }
     let max_completion_tokens: u32 = match std::env::var("SELKEY_MAX_COMPLETION_TOKENS") {
         Ok(v) => v.parse().unwrap_or_else(|e| {
             tracing::warn!("SELKEY_MAX_COMPLETION_TOKENS invalid ({v}: {e}), using default 4096");
