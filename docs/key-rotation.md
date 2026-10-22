@@ -47,6 +47,9 @@ it matches a relay key the verifier trusts (see the caveat above).
 ## Rotation procedure
 
 ```bash
+# 0. Record the current public key (old receipts verify with the public key alone)
+curl -s http://localhost:3100/tee/info | jq .receipt_signing_pubkey_hex
+
 # 1. Stop the relay (open sessions are lost)
 docker compose -f docker-compose.tee.yml stop tee-relay
 
@@ -61,3 +64,8 @@ docker compose -f docker-compose.tee.yml start tee-relay
 # 4. Verify new key via /tee/info
 curl -s http://localhost:3100/tee/info | jq .receipt_signing_pubkey_hex
 ```
+
+Once the new key is confirmed, delete `sealed_signing_key.retired`: verifying old
+receipts needs only the recorded public key, and the retired blob can still be unsealed
+by the same measurement (with the simulated runtime it is effectively the plaintext key).
+Delete it promptly after a suspected compromise.

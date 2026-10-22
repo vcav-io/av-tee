@@ -68,13 +68,15 @@ was used, because the assurance levels differ significantly:
 
 | Binding | Source field | Assurance | When it occurs |
 |---------|-------------|-----------|----------------|
-| **UserData** | `tee_attestation.user_data_hex` | Hardware-bound — the hash is inside the SEV-SNP attestation report, signed by the platform. Shows the report was requested by code in a CVM with this launch measurement (which doesn't yet cover the relay binary). | Real CVM with attestation support |
-| **TranscriptHashFallback** | `tee_attestation.transcript_hash_hex` | Relay-asserted — the hash is correct but set by the relay software, not bound into the attestation. A compromised relay could substitute a different hash without detection. | Simulated mode, or real CVM before `user_data` binding was deployed |
+| **UserData** | `tee_attestation.user_data_hex` | Hardware-bound only when the quote was checked by the SEV-SNP quote verifier and its certificate chain verified: the hash is then inside the attestation report, signed by the platform, and shows the report was requested by code in a CVM with this launch measurement (which doesn't yet cover the relay binary). With the simulated runtime the same binding is reached but nothing is hardware-bound. | Whenever `user_data_hex` is present, including the simulated runtime |
+| **TranscriptHashFallback** | `tee_attestation.transcript_hash_hex` | Relay-asserted — the hash is correct but set by the relay software, not bound into the attestation. A compromised relay could substitute a different hash without detection. | Receipts without `user_data_hex` (older relays) |
 | **None** | *(neither field present)* | Unverifiable — no reference exists to compare against. | Malformed or very old receipts |
 
 ### Recommendations for callers
 
-- **Production verifiers** should require `TranscriptBinding::UserData`. Accept
+- **Production verifiers** should require `TranscriptBinding::UserData` **and** a
+  quote verified by the SEV-SNP quote verifier (not the simulated one); UserData
+  alone does not exclude simulated receipts. Accept
   `TranscriptHashFallback` only during a migration window when older receipts
   are still in circulation.
 - **Display/debugging UIs** may show the binding level alongside the

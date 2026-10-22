@@ -1,7 +1,8 @@
 # selkey-tee
 
-The confidential execution lane for [Selkey](https://github.com/vcav-io/selkey). It runs the
-Selkey relay protocol inside an AMD SEV-SNP confidential VM.
+The confidential execution lane for [Selkey](https://github.com/vcav-io/selkey). It is designed to run
+the Selkey relay protocol inside an AMD SEV-SNP confidential VM; today it implements part of
+the protocol and runs simulated by default (see [Known gaps](docs/deployment.md#known-gaps)).
 
 **Status: prototype, not yet secure.** Don't rely on it for confidentiality. The shipped
 container image runs the simulated runtime, which has no hardware isolation, and the SEV-SNP
