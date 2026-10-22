@@ -9,7 +9,7 @@ measurement doesn't yet cover the relay binary. See [Caveats](#caveats).
 
 ## What it does
 
-The relay runs entirely inside the attested CVM. For each session it computes a transcript hash
+The relay is designed to run entirely inside the attested CVM. For each session it computes a transcript hash
 (SHA-512 over canonical JSON) that commits to:
 
 - the contract hash
@@ -17,13 +17,16 @@ The relay runs entirely inside the attested CVM. For each session it computes a 
 - the initiator and responder submission hashes
 - the output hash
 - the receipt signing public key
-- the model identity (provider/model) as reported by the provider's API
+- the model identity (provider/model): provider-reported (or the configured model ID if the
+  provider omits it)
 
 On a real SEV-SNP CVM, this 64-byte hash goes into the attestation report's `REPORT_DATA` field,
 so the hardware-signed report covers the transcript. See `packages/tee-transcript`.
 
 Model identity is **provider-reported**: the relay records the model ID returned by the
-provider's API. Nothing binds or verifies which model actually ran.
+provider's API, or the configured model ID if the provider omits it. Nothing binds or verifies
+which model actually ran. The provider endpoint and model ID are operator configuration and
+aren't bound into the attestation.
 
 Receipts from a real SEV-SNP CVM carry assurance level `TEE_ATTESTED`. Receipts from the
 simulated runtime (development and CI), like those from the software lane, carry `SELF_ASSERTED`.

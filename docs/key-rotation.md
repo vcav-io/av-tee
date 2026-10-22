@@ -12,18 +12,24 @@ by restarting the enclave with the sealed key file removed:
 The new key is automatically attested via the CVM's attestation report.
 Verifiers check that the key was attested under a known-good measurement.
 
+**Caveat:** until measured boot ships, the launch measurement doesn't cover the
+relay binary, so a key attested under a known-good measurement doesn't identify
+the relay code that holds it. Until then, verifiers should pin the relay key
+they trust rather than accept any key attested under a measurement.
+
 ## What rotation provides
 
 - **Key compromise recovery**: A new key can be deployed without reimaging
 - **Operational flexibility**: Operators can rotate without coordination
-- **Attestation continuity**: Same measurement, different key — verifiers
-  accept any key attested under the measurement
+- **Attestation continuity**: Same measurement, different key — once the
+  measurement covers the relay, verifiers can accept any key attested under it
+  (until then, pin the key; see the caveat above)
 
 ## What rotation does NOT provide
 
 - **Revocation**: Old keys remain valid for verifying old receipts. There is
-  no CRL or OCSP equivalent. Verifiers accept any key ever attested under
-  a valid measurement.
+  no CRL or OCSP equivalent. A verifier that accepts attested keys accepts any
+  key ever attested under a valid measurement.
 - **Key continuity**: The new key has no cryptographic relationship to the
   old key. There is no key derivation chain.
 - **Multiple concurrent keys**: Only one key is active at a time. During
@@ -33,8 +39,9 @@ Verifiers check that the key was attested under a known-good measurement.
 
 Receipts signed with the old key remain valid. The `tee_attestation` block
 in each receipt records the `receipt_signing_pubkey_hex` that signed it.
-Verifiers extract this key and use it for signature verification regardless
-of what key the relay currently uses.
+A verifier can use this key for signature verification, regardless of what key
+the relay currently uses, only after it has verified the attestation for it and
+it matches a relay key the verifier trusts (see the caveat above).
 
 ## Rotation procedure
 

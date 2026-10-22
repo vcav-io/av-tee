@@ -5,7 +5,7 @@ Confidential VM with remote attestation and encrypted ingress.
 
 ## Trust boundary
 
-The entire relay process runs inside the attested CVM. "In-enclave" means
+The entire relay process is designed to run inside the attested CVM (prototype: see README caveats). "In-enclave" means
 "in the attested VM's private memory". Network egress to model providers still
 exists — provider sees plaintext (explicit non-goal to solve here).
 
