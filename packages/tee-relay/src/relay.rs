@@ -269,6 +269,48 @@ fn validate_output_schema(
     Ok(())
 }
 
+/// Largest integer exactly representable in an f64 (2^53 - 1).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Rewrite integral numbers written as floats (`1.0`, `-0.0`, `0e5`) as
+/// integers, recursively, within +/-(2^53-1).
+///
+/// A model can otherwise choose among several spellings of the same value
+/// that JSON Schema accepts as an `integer`, or as equal to an `enum`/`const`
+/// member, adding output entropy the schema bound does not count.
+pub fn normalize_integral_numbers(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Number(n) if !n.is_i64() && !n.is_u64() => match n.as_f64() {
+            Some(f) if f.fract() == 0.0 && f.abs() <= MAX_SAFE_INTEGER => {
+                serde_json::Value::from(f as i64)
+            }
+            _ => serde_json::Value::Number(n),
+        },
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(normalize_integral_numbers).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, normalize_integral_numbers(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// The output in canonical form (RFC 8785, receipt v3 profile), re-parsed
+/// from the canonical bytes, and `hex(SHA-256)` of those bytes.
+pub fn canonical_output(
+    output: &serde_json::Value,
+) -> Result<(serde_json::Value, String), RelayError> {
+    let canonical = receipt_core::canonicalize_v3(output)
+        .map_err(|e| RelayError::OutputValidation(format!("output canonicalization: {e}")))?;
+    let hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+    let value = serde_json::from_str(&canonical)
+        .map_err(|e| RelayError::Internal(format!("canonical output: {e}")))?;
+    Ok((value, hash))
+}
+
 /// `hex(SHA-256(JCS(value)))` with the receipt v3 canonicalisation profile
 /// (RFC 8785, numbers limited to +/-(2^53-1)).
 pub fn hash_json_v3(value: &serde_json::Value) -> Result<String, RelayError> {
@@ -456,14 +498,19 @@ pub async fn relay_core(
         .await?;
     let inference_end = Utc::now();
 
-    // 7. Parse and validate output
+    // 7. Parse, normalise and validate output, then take its canonical form
     let output: serde_json::Value = serde_json::from_str(&provider_response.text)
         .map_err(|e| RelayError::OutputValidation(format!("output is not valid JSON: {e}")))?;
+    let output = normalize_integral_numbers(output);
 
     validate_output_schema(&output, &contract.output_schema)?;
 
+    // The delivered output, the receipt's `output` and `output_hash` all use
+    // the canonical (RFC 8785) form, so the number spelling chosen by the
+    // model cannot carry information beyond what the schema allows.
+    let (output, output_hash) = canonical_output(&output)?;
+
     // 8. Build TEE receipt
-    let output_hash = hash_json_v3(&output)?;
     let receipt = build_tee_receipt_v3(
         session_id,
         contract_hash_hex,
@@ -881,6 +928,29 @@ mod tests {
             matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
             "no connection may reach the listener"
         );
+    }
+
+    #[test]
+    fn integral_numbers_are_normalised() {
+        let input: serde_json::Value =
+            serde_json::from_str(r#"{"a":[0,0.0,-0.0,0e5,1.0,1.5,-3.0],"b":{"c":2E1}}"#).unwrap();
+        let out = super::normalize_integral_numbers(input);
+        assert_eq!(
+            serde_json::to_string(&out).unwrap(),
+            r#"{"a":[0,0,0,0,1,1.5,-3],"b":{"c":20}}"#
+        );
+    }
+
+    #[test]
+    fn canonical_output_hash_is_over_the_canonical_bytes() {
+        let value = serde_json::json!({"b": 1, "a": "x"});
+        let (canonical, hash) = super::canonical_output(&value).unwrap();
+        assert_eq!(
+            serde_json::to_string(&canonical).unwrap(),
+            r#"{"a":"x","b":1}"#
+        );
+        assert_eq!(hash, hex::encode(Sha256::digest(br#"{"a":"x","b":1}"#)));
+        assert_eq!(hash, super::hash_json_v3(&value).unwrap());
     }
 
     #[test]

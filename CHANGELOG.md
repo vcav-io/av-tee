@@ -19,6 +19,9 @@
     strict inline schemas may not carry `$schema`. The strict check visits every subschema:
     `enum`/`const` nodes may not carry subschemas, and object/array keywords are allowed only on
     nodes of that type. jsonschema is built without HTTP/file reference resolution.
+  - Output is normalised (integral numbers written as floats become integers) before
+    validation, and delivered in canonical RFC 8785 form; `output` and `output_hash` in the
+    receipt cover the same canonical bytes.
   - Failure receipts for schema-rejected output have status `rejected` and `signal_class`
     `schema_validation_failed` (was `error` / `inference_error`); provider failures are
     `provider_error`.

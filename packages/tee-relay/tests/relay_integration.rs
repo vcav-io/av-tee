@@ -1475,3 +1475,85 @@ async fn session_creation_rejects_references_under_const_and_enum_nodes() {
         "no connection may reach the listener"
     );
 }
+
+/// Run a session whose provider returns `provider_text`; return the parsed
+/// output response and the raw response body.
+async fn run_with_provider_text(
+    output_schema: serde_json::Value,
+    provider_text: &str,
+) -> (SessionOutputResponse, String) {
+    let mock_url = start_mock_provider(provider_text).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+    let mut contract = test_contract();
+    contract.output_schema = output_schema;
+    let session = create_session(&client, &base, contract).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+    let raw = client
+        .get(format!("{base}/sessions/{}/output", session.session_id))
+        .bearer_auth(&session.read_token)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    (output, raw)
+}
+
+/// The delivered output is the canonical form, and the receipt hashes it.
+fn assert_delivered_canonical(output: &SessionOutputResponse, raw: &str, expected: &str) {
+    assert_eq!(output.state, tee_relay::session::SessionState::Completed);
+    let delivered = output.output.as_ref().expect("output");
+    let canonical = receipt_core::canonicalize_v3(delivered).unwrap();
+    assert_eq!(canonical, expected);
+    assert!(raw.contains(expected), "delivered body: {raw}");
+    let receipt = output.receipt.as_ref().expect("receipt");
+    assert_eq!(
+        receipt.commitments.output_hash,
+        hex::encode(Sha256::digest(expected.as_bytes()))
+    );
+    assert_eq!(receipt.commitments.output.as_ref(), Some(delivered));
+}
+
+#[tokio::test]
+async fn integer_spellings_are_delivered_in_canonical_form() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "v": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "integer", "minimum": 0, "maximum": 0}
+            }
+        },
+        "required": ["v"],
+        "additionalProperties": false
+    });
+    let (output, raw) = run_with_provider_text(schema, r#"{"v":[0,0.0,-0.0,0e5]}"#).await;
+    assert_delivered_canonical(&output, &raw, r#"{"v":[0,0,0,0]}"#);
+}
+
+#[tokio::test]
+async fn enum_number_spellings_are_delivered_in_canonical_form() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"n": {"enum": [1, 2]}},
+        "required": ["n"],
+        "additionalProperties": false
+    });
+    let (output, raw) = run_with_provider_text(schema, r#"{"n":1.0}"#).await;
+    assert_delivered_canonical(&output, &raw, r#"{"n":1}"#);
+}
+
+#[tokio::test]
+async fn const_number_spellings_are_delivered_in_canonical_form() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"c": {"const": 0}},
+        "required": ["c"],
+        "additionalProperties": false
+    });
+    let (output, raw) = run_with_provider_text(schema, r#"{"c":-0.0}"#).await;
+    assert_delivered_canonical(&output, &raw, r#"{"c":0}"#);
+}

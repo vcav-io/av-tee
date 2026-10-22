@@ -98,6 +98,10 @@ it as `receipt`. In the TEE lane:
   - Rejected (not enforced by tee-relay): `timing_class`, `enforcement_policy_hash`,
     `model_profile_id`, `model_profile_hash`, `model_constraints`, `session_ttl_secs` and
     `invite_ttl_secs`. Session lifetime is the relay-wide `SELKEY_SESSION_TTL_SECS`.
+- Model output is normalised before validation (integral numbers written as floats, such as
+  `1.0`, `-0.0` or `0e5`, become integers) and delivered in its canonical RFC 8785 form; the
+  receipt's `output` and `output_hash` are over the same canonical bytes. So the spelling of a
+  number can't carry information the schema bound doesn't count.
 - Output that the schema rejects gets a failure receipt with status `rejected` and
   `signal_class` `schema_validation_failed`; provider failures get `error` / `provider_error`.
 - `initiator_submission_hash` and `responder_submission_hash` are SHA-256 hashes of the
