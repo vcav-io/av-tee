@@ -132,6 +132,13 @@ async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::Si
     let anthropic_model_id = std::env::var("SELKEY_MODEL_ID")
         .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
     let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+    if let Some(url) = anthropic_base_url.as_deref()
+        && let Err(e) = tee_relay::provider::anthropic::validate_base_url(url)
+    {
+        // The message names the problem, never the URL.
+        tracing::error!("{e}; refusing to start"); // SAFETY: no plaintext
+        std::process::exit(1);
+    }
     let max_completion_tokens: u32 = match std::env::var("SELKEY_MAX_COMPLETION_TOKENS") {
         Ok(v) => v.parse().unwrap_or_else(|e| {
             tracing::warn!("SELKEY_MAX_COMPLETION_TOKENS invalid ({v}: {e}), using default 4096");
@@ -160,6 +167,7 @@ async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::Si
         anthropic_base_url,
         max_completion_tokens,
         operator_id,
+        env: std::env::var("SELKEY_ENV").unwrap_or_default(),
     };
 
     let state = Arc::new(RelayState {

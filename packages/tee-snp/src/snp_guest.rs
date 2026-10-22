@@ -21,6 +21,8 @@ pub(crate) struct ParsedReport {
     pub report_bytes: Vec<u8>,
     pub measurement_hex: String,
     pub user_data: [u8; 64],
+    // Read only on Linux, where the device returns certificates.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub vcek_cert_der: Option<Vec<u8>>,
 }
 

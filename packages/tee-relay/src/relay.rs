@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use tee_core::attestation::CvmRuntime;
-use tee_transcript::{TranscriptInputsV2, compute_transcript_hash_v2};
+use tee_transcript::{RelayConfig, TranscriptInputsV3, compute_transcript_hash_v3};
 
 use crate::error::RelayError;
 use crate::provider::ProviderRequest;
@@ -16,6 +16,16 @@ use crate::provider::anthropic::AnthropicProvider;
 
 pub const INLINE_PROMPT_TEMPLATE_HASH: &str =
     "592ce8974206a5744aefacfdc5530dbe6972f43e20794714a00d3425fb7f54d1";
+
+/// Source revision recorded at build time (`SELKEY_TEE_GIT_REV`), bound into
+/// the relay configuration hash.
+pub const RELAY_GIT_REV: &str = match option_env!("SELKEY_TEE_GIT_REV") {
+    Some(rev) => rev,
+    None => "unknown",
+};
+
+/// Provider id bound into the relay configuration.
+pub const PROVIDER_ID: &str = "anthropic";
 
 /// Shared application state for the TEE relay.
 pub struct AppState {
@@ -26,6 +36,30 @@ pub struct AppState {
     pub anthropic_base_url: Option<String>,
     pub max_completion_tokens: u32,
     pub operator_id: String,
+    /// Deployment environment label (`SELKEY_ENV`), bound into the relay
+    /// configuration. Empty when unset.
+    pub env: String,
+}
+
+impl AppState {
+    /// The configuration this relay runs with, as bound into transcript v3.
+    pub fn relay_config(&self) -> RelayConfig {
+        RelayConfig {
+            provider_id: PROVIDER_ID.to_string(),
+            provider_base_url: crate::provider::anthropic::effective_base_url(
+                self.anthropic_base_url.as_deref(),
+            ),
+            model_id_requested: self.anthropic_model_id.clone(),
+            // tee-relay has no policy lockfile and does not accept model
+            // profiles (contracts naming one are rejected).
+            policy_lockfile_hash: String::new(),
+            model_profile_allowlist_hash: String::new(),
+            relay_git_rev: RELAY_GIT_REV.to_string(),
+            echo_mode: false,
+            simulated: !self.cvm.is_real_tee(),
+            env: self.env.clone(),
+        }
+    }
 }
 
 // Manual Debug to prevent signing key / API key leaking via panic/log.
@@ -388,46 +422,6 @@ pub async fn relay_core(
     Ok(RelayResult { output, receipt })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::INLINE_PROMPT_TEMPLATE_HASH;
-    use sha2::{Digest, Sha256};
-
-    #[test]
-    fn decrypted_input_debug_redacts_commitment_nonce() {
-        let nonce = "3c".repeat(32);
-        let plaintext = serde_json::json!({
-            "role": "alice",
-            "context": {"secret": "value"},
-            "commitment_nonce": nonce,
-        });
-        let input = super::parse_decrypted_input(&serde_json::to_vec(&plaintext).unwrap()).unwrap();
-        let debug = format!("{input:?}");
-        assert!(!debug.contains(&nonce));
-        assert!(!debug.contains("value"));
-    }
-
-    #[test]
-    fn parse_decrypted_input_errors_do_not_echo_the_nonce() {
-        let nonce = "3C".repeat(32);
-        let plaintext = serde_json::json!({
-            "role": "alice",
-            "context": {},
-            "commitment_nonce": nonce,
-        });
-        let err = super::parse_decrypted_input(&serde_json::to_vec(&plaintext).unwrap())
-            .expect_err("uppercase nonce is rejected");
-        assert!(!err.to_string().contains(&nonce));
-    }
-
-    #[test]
-    fn inline_prompt_template_hash_constant_matches_v1_program_id() {
-        let mut hasher = Sha256::new();
-        hasher.update(b"av-tee-inline-prompt-v1");
-        assert_eq!(INLINE_PROMPT_TEMPLATE_HASH, hex::encode(hasher.finalize()));
-    }
-}
-
 /// Receipt operator block: `operator_key_fingerprint = SHA-256(signing pubkey)`.
 fn operator_v3(state: &AppState) -> OperatorV3 {
     OperatorV3 {
@@ -463,8 +457,10 @@ async fn build_tee_receipt_v3(
     // Compute model identity once — used for both transcript binding and claims
     let model_identity_asserted = format!("anthropic/{model_id}");
 
-    // Build transcript hash for attestation binding (v2: includes model identity)
-    let transcript_inputs = TranscriptInputsV2 {
+    // Build transcript hash for attestation binding (v3: model identity and
+    // relay configuration hash, length-prefixed encoding)
+    let relay_config_hash = state.relay_config().hash_hex();
+    let transcript_inputs = TranscriptInputsV3 {
         contract_hash,
         prompt_template_hash,
         initiator_submission_hash,
@@ -472,8 +468,9 @@ async fn build_tee_receipt_v3(
         output_hash,
         receipt_signing_pubkey_hex: &receipt_signing_pubkey_hex,
         model_identity_asserted: &model_identity_asserted,
+        relay_config_hash: &relay_config_hash,
     };
-    let transcript_hash = compute_transcript_hash_v2(&transcript_inputs);
+    let transcript_hash = compute_transcript_hash_v3(&transcript_inputs);
     let transcript_hash_hex = hex::encode(transcript_hash);
 
     // Get CVM attestation bound to transcript hash
@@ -597,7 +594,8 @@ pub async fn build_failure_receipt_v3(
     let missing_field = "";
     let empty_hash = hex::encode(Sha256::digest(b""));
 
-    let transcript_inputs = TranscriptInputsV2 {
+    let relay_config_hash = state.relay_config().hash_hex();
+    let transcript_inputs = TranscriptInputsV3 {
         contract_hash,
         prompt_template_hash: missing_field,
         initiator_submission_hash: initiator_submission_hash.unwrap_or(missing_field),
@@ -605,8 +603,9 @@ pub async fn build_failure_receipt_v3(
         output_hash: &empty_hash,
         receipt_signing_pubkey_hex: &receipt_signing_pubkey_hex,
         model_identity_asserted: missing_field,
+        relay_config_hash: &relay_config_hash,
     };
-    let transcript_hash = compute_transcript_hash_v2(&transcript_inputs);
+    let transcript_hash = compute_transcript_hash_v3(&transcript_inputs);
     let transcript_hash_hex = hex::encode(transcript_hash);
 
     let report = state
@@ -693,4 +692,44 @@ pub async fn build_failure_receipt_v3(
 
     receipt_core::sign_and_assemble_receipt_v3(unsigned, &state.signing_key)
         .map_err(|e| RelayError::ReceiptSigning(format!("v3 failure receipt signing failed: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::INLINE_PROMPT_TEMPLATE_HASH;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn decrypted_input_debug_redacts_commitment_nonce() {
+        let nonce = "3c".repeat(32);
+        let plaintext = serde_json::json!({
+            "role": "alice",
+            "context": {"secret": "value"},
+            "commitment_nonce": nonce,
+        });
+        let input = super::parse_decrypted_input(&serde_json::to_vec(&plaintext).unwrap()).unwrap();
+        let debug = format!("{input:?}");
+        assert!(!debug.contains(&nonce));
+        assert!(!debug.contains("value"));
+    }
+
+    #[test]
+    fn parse_decrypted_input_errors_do_not_echo_the_nonce() {
+        let nonce = "3C".repeat(32);
+        let plaintext = serde_json::json!({
+            "role": "alice",
+            "context": {},
+            "commitment_nonce": nonce,
+        });
+        let err = super::parse_decrypted_input(&serde_json::to_vec(&plaintext).unwrap())
+            .expect_err("uppercase nonce is rejected");
+        assert!(!err.to_string().contains(&nonce));
+    }
+
+    #[test]
+    fn inline_prompt_template_hash_constant_matches_v1_program_id() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"av-tee-inline-prompt-v1");
+        assert_eq!(INLINE_PROMPT_TEMPLATE_HASH, hex::encode(hasher.finalize()));
+    }
 }

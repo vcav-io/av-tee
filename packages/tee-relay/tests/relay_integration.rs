@@ -14,7 +14,7 @@ use tee_relay::handlers::{self, RelayState};
 use tee_relay::relay::AppState;
 use tee_relay::session::SessionStore;
 use tee_relay::types::*;
-use tee_transcript::{TranscriptInputsV2, compute_transcript_hash_v2};
+use tee_transcript::{TranscriptInputsV3, compute_transcript_hash_v3};
 
 /// Start a mock Anthropic API server that returns an HTTP error.
 async fn start_failing_mock_provider(status_code: u16) -> String {
@@ -127,6 +127,7 @@ fn test_relay_state(mock_url: &str) -> Arc<RelayState> {
             anthropic_base_url: Some(mock_url.to_string()),
             max_completion_tokens: 4096,
             operator_id: "test-operator".to_string(),
+            env: String::new(),
         },
         sessions: Arc::new(SessionStore::new(Duration::from_secs(600))),
     })
@@ -677,7 +678,13 @@ async fn relay_transcript_hash_matches_recomputed() {
         .model_identity_asserted
         .as_deref()
         .unwrap_or("");
-    let recomputed = compute_transcript_hash_v2(&TranscriptInputsV2 {
+    let relay_config = info.relay_config.as_ref().expect("relay_config");
+    let relay_config_hash = relay_config.hash_hex();
+    assert_eq!(
+        info.relay_config_hash.as_deref(),
+        Some(relay_config_hash.as_str())
+    );
+    let recomputed = compute_transcript_hash_v3(&TranscriptInputsV3 {
         contract_hash: &receipt.commitments.contract_hash,
         prompt_template_hash,
         initiator_submission_hash: &init_ct_hash,
@@ -685,6 +692,7 @@ async fn relay_transcript_hash_matches_recomputed() {
         output_hash,
         receipt_signing_pubkey_hex: &info.receipt_signing_pubkey_hex,
         model_identity_asserted: model_identity,
+        relay_config_hash: &relay_config_hash,
     });
 
     assert_eq!(receipt_transcript_hex, &hex::encode(recomputed));
@@ -816,7 +824,16 @@ async fn relay_failure_receipt_on_provider_error() {
         .transcript_hash_hex
         .as_deref()
         .expect("failure receipt transcript hash");
-    let recomputed = compute_transcript_hash_v2(&TranscriptInputsV2 {
+    let info: TeeInfoResponse = client
+        .get(format!("{base}/tee/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let relay_config_hash = info.relay_config_hash.expect("relay_config_hash");
+    let recomputed = compute_transcript_hash_v3(&TranscriptInputsV3 {
         contract_hash: &receipt.commitments.contract_hash,
         prompt_template_hash: "",
         initiator_submission_hash: receipt
@@ -839,6 +856,7 @@ async fn relay_failure_receipt_on_provider_error() {
             .model_identity_asserted
             .as_deref()
             .unwrap_or(""),
+        relay_config_hash: &relay_config_hash,
     });
     assert_eq!(receipt_transcript_hex, hex::encode(recomputed));
 }
@@ -1228,4 +1246,43 @@ async fn relay_rejects_unsupported_prompt_template_hash() {
     let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
 
     assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+}
+
+#[tokio::test]
+async fn tee_info_publishes_the_relay_config_bound_into_transcripts() {
+    let mock_url = start_mock_provider("{}").await;
+    let base = start_relay_server(&mock_url).await;
+    let info: TeeInfoResponse = reqwest::Client::new()
+        .get(format!("{base}/tee/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        info.transcript_version.as_deref(),
+        Some(tee_transcript::TRANSCRIPT_VERSION_V3)
+    );
+    let config = info.relay_config.expect("relay_config");
+    assert_eq!(config.provider_id, "anthropic");
+    assert_eq!(config.provider_base_url, mock_url);
+    assert_eq!(config.model_id_requested, "claude-sonnet-4-5-20250929");
+    assert!(
+        config.simulated,
+        "SimulatedCvm must be reported as simulated"
+    );
+    assert!(!config.echo_mode);
+    assert_eq!(info.relay_config_hash, Some(config.hash_hex()));
+}
+
+#[tokio::test]
+async fn relay_config_hash_differs_between_provider_base_urls() {
+    let state_a = test_relay_state("https://api.anthropic.com");
+    let state_b = test_relay_state("https://api.example.test");
+    assert_ne!(
+        state_a.app.relay_config().hash_hex(),
+        state_b.app.relay_config().hash_hex()
+    );
 }

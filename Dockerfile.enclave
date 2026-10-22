@@ -4,7 +4,9 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY packages/ packages/
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-RUN cargo build --release -p tee-relay
+# Source revision bound into the relay configuration hash (transcript v3).
+ARG SELKEY_TEE_GIT_REV=unknown
+RUN SELKEY_TEE_GIT_REV="${SELKEY_TEE_GIT_REV}" cargo build --release -p tee-relay
 
 # --- Runtime stage ---
 FROM debian:bookworm-slim

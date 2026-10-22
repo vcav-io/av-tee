@@ -100,6 +100,7 @@ pub async fn start_relay_server(mock_url: &str) -> String {
             anthropic_base_url: Some(mock_url.to_string()),
             max_completion_tokens: 4096,
             operator_id: "test-operator".to_string(),
+            env: String::new(),
         },
         sessions: Arc::new(SessionStore::new(Duration::from_secs(600))),
     });

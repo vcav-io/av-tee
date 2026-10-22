@@ -40,10 +40,10 @@ fn random_token() -> String {
 /// GET /tee/info — return enclave identity + signing pubkey.
 pub async fn tee_info(State(state): State<Arc<RelayState>>) -> Json<TeeInfoResponse> {
     let pubkey_hex = hex::encode(state.app.signing_key.verifying_key().as_bytes());
-    Json(TeeInfoResponse::from_identity_and_pubkey(
-        state.app.cvm.identity(),
-        &pubkey_hex,
-    ))
+    Json(
+        TeeInfoResponse::from_identity_and_pubkey(state.app.cvm.identity(), &pubkey_hex)
+            .with_relay_config(state.app.relay_config()),
+    )
 }
 
 /// POST /sessions — create a new relay session with per-session ECDH keypair.
