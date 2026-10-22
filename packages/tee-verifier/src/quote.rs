@@ -1,3 +1,4 @@
+use receipt_core::TeeType;
 use sha2::{Digest, Sha256};
 
 use crate::result::AttestationStatus;
@@ -26,11 +27,23 @@ pub enum QuoteVerifyError {
     MissingReceiptUserData,
     #[error("receipt has quote but no measurement")]
     MissingReceiptMeasurement,
+    #[error(
+        "receipt tee_type {receipt:?} does not match the quote verifier's platform {verifier:?}"
+    )]
+    TeeTypeMismatch {
+        receipt: Option<TeeType>,
+        verifier: TeeType,
+    },
+    #[error("simulated attestation in a receipt that claims TEE_ATTESTED assurance")]
+    SimulatedClaimsTeeAttested,
 }
 
 /// The level of cryptographic assurance the verifier provides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationLevel {
+    /// Simulated quote: format checked. There is no platform signature, so
+    /// this never counts as platform verification.
+    Simulated,
     /// Fields extracted and format validated, but no platform signature checked.
     Parsed,
     /// Full platform cryptographic chain verified (e.g., VCEK -> ASK -> ARK).
@@ -61,6 +74,11 @@ pub struct VerifiedQuote {
 /// SNP report struct, etc). The caller (`verify_tee_receipt`) is responsible
 /// for cross-checking extracted fields against receipt claims.
 pub trait QuoteVerifier: Send + Sync {
+    /// The platform this verifier handles. A receipt whose
+    /// `tee_attestation.tee_type` differs is rejected before the quote is
+    /// parsed.
+    fn tee_type(&self) -> TeeType;
+
     fn verify_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedQuote, QuoteVerifyError>;
 }
 
@@ -71,14 +89,19 @@ pub trait QuoteVerifier: Send + Sync {
 /// Verifier for simulated TEE quotes produced by `SimulatedCvm`.
 ///
 /// Simulated quotes have format: `b"simulated-quote:" || user_data` (80 bytes).
-/// In simulated mode the format check IS the complete verification — there is
-/// no certificate chain to verify. Returns `VerificationLevel::ChainVerified`.
+/// Anyone can produce one, so a simulated quote shows nothing about the
+/// platform. Returns `VerificationLevel::Simulated`, which maps to
+/// `AttestationStatus::QuoteSimulated` and never to `QuoteVerified`.
 pub struct SimulatedQuoteVerifier;
 
 const SIMULATED_PREFIX: &[u8] = b"simulated-quote:";
 const SIMULATED_QUOTE_LEN: usize = 16 + 64; // prefix + user_data
 
 impl QuoteVerifier for SimulatedQuoteVerifier {
+    fn tee_type(&self) -> TeeType {
+        TeeType::Simulated
+    }
+
     fn verify_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedQuote, QuoteVerifyError> {
         if quote_bytes.len() != SIMULATED_QUOTE_LEN {
             return Err(QuoteVerifyError::WrongLength {
@@ -101,7 +124,7 @@ impl QuoteVerifier for SimulatedQuoteVerifier {
                 user_data,
                 measurement,
             },
-            level: VerificationLevel::ChainVerified,
+            level: VerificationLevel::Simulated,
         })
     }
 }
@@ -141,6 +164,10 @@ const SNP_MEASUREMENT_LEN: usize = 48;
 const SNP_EXPECTED_VERSION: u32 = 2;
 
 impl QuoteVerifier for SevSnpQuoteVerifier {
+    fn tee_type(&self) -> TeeType {
+        TeeType::SevSnp
+    }
+
     fn verify_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedQuote, QuoteVerifyError> {
         if quote_bytes.len() != SNP_REPORT_SIZE {
             return Err(QuoteVerifyError::WrongLength {
@@ -220,6 +247,7 @@ pub(crate) fn cross_check_and_map(
     Ok(match verified.level {
         VerificationLevel::ChainVerified => AttestationStatus::QuoteVerified,
         VerificationLevel::Parsed => AttestationStatus::QuoteParsed,
+        VerificationLevel::Simulated => AttestationStatus::QuoteSimulated,
     })
 }
 
@@ -238,7 +266,7 @@ mod tests {
 
         let result = SimulatedQuoteVerifier.verify_quote(&quote).unwrap();
         assert_eq!(result.fields.user_data, [0x42; 64]);
-        assert_eq!(result.level, VerificationLevel::ChainVerified);
+        assert_eq!(result.level, VerificationLevel::Simulated);
     }
 
     #[test]
@@ -370,6 +398,32 @@ mod tests {
             cross_check_and_map(&verified, Some(&hex::encode(user_data)), Some(&measurement))
                 .unwrap();
         assert_eq!(result, AttestationStatus::QuoteVerified);
+    }
+
+    #[test]
+    fn cross_check_simulated_level_never_maps_to_verified() {
+        let user_data = [0x42; 64];
+        let measurement = "abc123".to_string();
+        let verified = VerifiedQuote {
+            fields: QuoteFields {
+                user_data,
+                measurement: measurement.clone(),
+            },
+            level: VerificationLevel::Simulated,
+        };
+        let result =
+            cross_check_and_map(&verified, Some(&hex::encode(user_data)), Some(&measurement))
+                .unwrap();
+        assert_eq!(result, AttestationStatus::QuoteSimulated);
+    }
+
+    #[test]
+    fn verifiers_report_their_platform() {
+        assert_eq!(SimulatedQuoteVerifier.tee_type(), TeeType::Simulated);
+        assert_eq!(
+            SevSnpQuoteVerifier::parsing_only().tee_type(),
+            TeeType::SevSnp
+        );
     }
 
     #[test]

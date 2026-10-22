@@ -10,8 +10,14 @@
 | Binary tampering | Measurement verification (not yet effective) | Verifiers check measurement against allowlist; the measurement does not yet cover the relay binary |
 | Key injection by operator | Seal/unseal lifecycle (not guaranteed yet) | Signing key generated inside CVM, sealed to platform; depends on measured boot covering the relay |
 
-These protections apply only to a real SEV-SNP CVM. The shipped container image runs the
-simulated runtime (see the README).
+These protections apply only to a real SEV-SNP CVM. The default container image has only the
+simulated runtime and starts only with `SELKEY_ALLOW_SIMULATED=1`; an `snp` build refuses to
+start if SEV-SNP initialisation fails, unless that variable is set (see the README).
+
+The sealed signing key (SEV-SNP) is bound to the guest policy, the launch measurement and a TCB
+floor, so it cannot be unsealed by a guest launched with a different policy or on a platform
+whose committed TCB was rolled back below the committed TCB at sealing time. It is still bound to a measurement that doesn't
+cover the relay, so other code in a guest with the same firmware measurement could unseal it.
 
 **Note on measurement coverage:** the SNP launch measurement covers what the hypervisor loads
 at launch. Without measured boot (kernel, initrd, command line and a verified root filesystem),
@@ -93,6 +99,22 @@ was used, because the assurance levels differ significantly:
 - `is_valid()` and `is_valid_sans_quote()` check `transcript_hash_valid` but
   do **not** enforce a minimum binding level — callers must check
   `transcript_binding` themselves if they need hardware-bound assurance.
+
+## Verifier checks
+
+- **Pinned key.** `tee-verifier` checks the receipt signature against the relay key from the
+  caller's configuration (`VerifyOptions::pinned_receipt_key`). The key named in
+  `tee_attestation.receipt_signing_pubkey_hex` must equal it. Without a pinned key the result
+  is `SignatureStatus::ValidUnpinned`, which no `is_valid*` method accepts: a receipt that names
+  its own key only shows that it is internally consistent.
+- **Platform type.** `tee_attestation.tee_type` must match the quote verifier's platform, so a
+  simulated quote can't stand in for an SEV-SNP receipt (or the reverse).
+- **Simulated quotes** are reported as `AttestationStatus::QuoteSimulated`, never as
+  `QuoteVerified`; `is_valid()` and `is_valid_parsed()` reject them, and
+  `is_valid_simulated()` exists for development and tests. A simulated quote in a receipt that
+  claims `TEE_ATTESTED` is rejected.
+- **Measurement allowlist entries** state what they cover (`platform`). A `gcp-snp-ovmf` match
+  supports only "genuine GCP SNP VM running Google-endorsed firmware; relay code not measured".
 
 ## Simulated mode caveats
 

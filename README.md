@@ -3,7 +3,7 @@
 The confidential execution lane for [Selkey](https://github.com/vcav-io/selkey). It runs the
 Selkey relay protocol inside an AMD SEV-SNP confidential VM.
 
-**Status: prototype, not yet secure.** Don't rely on it for confidentiality. The shipped
+**Status: prototype, not yet secure.** Don't rely on it for confidentiality. The default
 container image runs the simulated runtime, which has no hardware isolation, and the SEV-SNP
 measurement doesn't yet cover the relay binary. See [Caveats](#caveats).
 
@@ -112,10 +112,14 @@ before transcript v3 carry a v2 transcript, and `tee-verifier` still accepts the
 
 ## Caveats
 
-- **The shipped image runs the simulated runtime.** `Dockerfile.enclave` builds `tee-relay`
-  without the `snp` feature, so the container always uses `SimulatedCvm` and issues
-  `SELF_ASSERTED` receipts. A build with `--features snp` uses SEV-SNP when `/dev/sev-guest` is
-  available, and otherwise logs a warning and falls back to the simulated runtime.
+- **The default image runs the simulated runtime.** `Dockerfile.enclave` builds `tee-relay`
+  without the `snp` feature unless given `--build-arg CARGO_FEATURES=snp`. A simulated-only
+  build starts only with `SELKEY_ALLOW_SIMULATED=1` and issues `SELF_ASSERTED` receipts. An
+  `snp` build uses SEV-SNP through `/dev/sev-guest` and refuses to start if SEV-SNP
+  initialisation fails, unless `SELKEY_ALLOW_SIMULATED=1` is set. See
+  [docs/deployment.md](docs/deployment.md#sev-snp-runtime).
+- **Verify against a pinned relay key.** `tee-verifier` treats a receipt checked only against
+  the key it names itself as not valid (`ValidUnpinned`).
 - **The measurement doesn't cover the relay binary.** There's no measured boot yet. On a
   typical confidential VM running the relay in Docker (e.g. GCP N2D), the SNP launch
   measurement most likely covers the guest firmware only, not the kernel, the container image

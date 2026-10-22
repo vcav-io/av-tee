@@ -1,0 +1,75 @@
+name: Container smoke test
+
+# Builds the enclave image and starts it against a fresh named volume, as
+# docker-compose.tee.yml does, to check the relay can create and reuse its
+# sealed signing key as the non-root container user.
+on:
+  pull_request:
+    paths:
+      - "Dockerfile.enclave"
+      - "docker-compose.tee.yml"
+      - "packages/tee-relay/**"
+      - "packages/tee-core/**"
+      - ".github/workflows/container-smoke.yml"
+  workflow_dispatch:
+
+env:
+  IMAGE: selkey-tee-relay:smoke
+  VOLUME: selkey-tee-smoke
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (simulated-only)
+        run: docker build -f Dockerfile.enclave -t "$IMAGE" .
+
+      - name: Start relay on a fresh named volume (echo mode, simulated)
+        run: |
+          docker volume create "$VOLUME"
+          docker run -d --name relay \
+            -v "$VOLUME:/var/lib/selkey-tee" \
+            -e SELKEY_ALLOW_SIMULATED=1 \
+            -e SELKEY_TEE_ECHO_MODE=true \
+            -e SELKEY_BIND_ADDR=0.0.0.0 \
+            -p 127.0.0.1:3100:3100 \
+            "$IMAGE"
+
+      - name: Wait for /tee/info
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3100/tee/info > info1.json; then
+              cat info1.json; exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' relay)" != "true" ]; then
+              docker logs relay; exit 1
+            fi
+            sleep 1
+          done
+          docker logs relay; exit 1
+
+      - name: Sealed key exists, owned by the container user, mode 0600
+        run: |
+          UID_GID="$(docker run --rm --entrypoint sh "$IMAGE" -c 'echo "$(id -u):$(id -g)"')"
+          STAT="$(docker run --rm -v "$VOLUME:/data" debian:bookworm-slim \
+            stat -c '%u:%g %a' /data/sealed_signing_key)"
+          echo "container user $UID_GID; sealed key $STAT"
+          test "$STAT" = "$UID_GID 600"
+
+      - name: Restart reuses the sealed key
+        run: |
+          docker restart relay
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3100/tee/info > info2.json; then break; fi
+            sleep 1
+          done
+          K1="$(python3 -c 'import json;print(json.load(open("info1.json"))["receipt_signing_pubkey_hex"])')"
+          K2="$(python3 -c 'import json;print(json.load(open("info2.json"))["receipt_signing_pubkey_hex"])')"
+          echo "before $K1 after $K2"
+          test -n "$K1" && test "$K1" = "$K2"
+
+      - name: Logs
+        if: always()
+        run: docker logs relay || true

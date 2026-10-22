@@ -4,6 +4,10 @@ use crate::quote::QuoteVerifyError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AttestationStatus {
+    /// Simulated quote: format and cross-checks passed, but a simulated quote
+    /// has no platform signature and shows nothing about the platform.
+    /// Never counts as verified; see [`TeeVerificationResult::is_valid_simulated`].
+    QuoteSimulated,
     /// Quote parsed and fields extracted, but platform signature not checked.
     /// The extracted fields were cross-checked against receipt claims.
     QuoteParsed,
@@ -92,7 +96,15 @@ pub struct TeeVerificationResult {
 /// Status of the receipt signature check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureStatus {
+    /// The signature verifies under the caller's pinned relay key.
     Valid,
+    /// The signature verifies under the key named in
+    /// `tee_attestation.receipt_signing_pubkey_hex`, but no pinned key was
+    /// supplied. The receipt names its own key, so this shows only internal
+    /// consistency; it does not count as valid.
+    ValidUnpinned,
+    /// `tee_attestation.receipt_signing_pubkey_hex` differs from the pinned key.
+    KeyMismatch,
     Invalid,
     MissingKey,
     MalformedKey(String),
@@ -137,6 +149,41 @@ pub enum TranscriptBinding {
 }
 
 impl TeeVerificationResult {
+    /// What the result supports about the relay configuration and code.
+    ///
+    /// - v3 transcript, chain-verified quote and an allowlist entry whose
+    ///   platform covers the relay code: "relay config bound to measured
+    ///   relay code";
+    /// - other valid v3 transcripts: "relay config asserted (not
+    ///   code-attested)";
+    /// - valid v1/v2 transcripts: "code/config unbound";
+    /// - no valid transcript: `None`.
+    ///
+    /// Returns `None` unless all receipt-level checks pass
+    /// ([`Self::is_valid_sans_quote`]): a claim is never made for a receipt
+    /// with a bad signature, an unpinned key or an unknown measurement.
+    pub fn relay_config_claim(&self) -> Option<&'static str> {
+        if !self.is_valid_sans_quote() {
+            return None;
+        }
+        match self.transcript_schema {
+            Some(TranscriptSchema::V3) => {
+                let code_measured = self.attestation_status == AttestationStatus::QuoteVerified
+                    && self
+                        .measurement_match
+                        .as_ref()
+                        .is_some_and(|m| m.platform.covers_relay_code());
+                Some(if code_measured {
+                    "relay config bound to measured relay code"
+                } else {
+                    "relay config asserted (not code-attested)"
+                })
+            }
+            Some(_) => Some("code/config unbound"),
+            None => None,
+        }
+    }
+
     /// Returns `true` only when all cryptographic checks pass including
     /// full platform chain verification (`QuoteVerified`).
     pub fn is_valid(&self) -> bool {
@@ -154,14 +201,24 @@ impl TeeVerificationResult {
         ) && self.is_valid_sans_quote()
     }
 
-    /// Returns `true` when all receipt-level checks pass, regardless of
-    /// quote verification status. Use when quote verification is unavailable
-    /// or when `QuoteParsed` assurance is sufficient.
+    /// Returns `true` for a simulated quote (`QuoteSimulated`) when all
+    /// receipt-level checks pass. For development and tests only: a simulated
+    /// quote shows nothing about the platform.
+    pub fn is_valid_simulated(&self) -> bool {
+        self.attestation_status == AttestationStatus::QuoteSimulated && self.is_valid_sans_quote()
+    }
+
+    /// Returns `true` when all receipt-level checks pass and the quote was
+    /// not found invalid (`QuoteParsed`, `QuoteVerified` and `QuoteSimulated`
+    /// are accepted; any `QuoteInvalid` is rejected). Use when platform chain
+    /// verification is unavailable.
     ///
     /// Does NOT guarantee that the execution environment has been
-    /// platform-verified.
+    /// platform-verified. Requires a pinned key
+    /// (`SignatureStatus::Valid`).
     pub fn is_valid_sans_quote(&self) -> bool {
-        self.measurement_match.is_some()
+        !matches!(self.attestation_status, AttestationStatus::QuoteInvalid(_))
+            && self.measurement_match.is_some()
             && self.signature_status == SignatureStatus::Valid
             && self.attestation_hash_status == AttestationHashStatus::Valid
             && self.transcript_hash_valid

@@ -4,6 +4,36 @@
 
 ### Changed
 
+- TEE runtime hardening:
+  - The relay no longer falls back to the simulated runtime silently. A build without `snp`
+    starts only with `SELKEY_ALLOW_SIMULATED=1`; an `snp` build exits if SEV-SNP initialisation
+    (opening `/dev/sev-guest` and requesting a report) fails, unless that variable is set.
+    `Dockerfile.enclave` takes `--build-arg CARGO_FEATURES=snp`; `docker-compose.tee.yml` sets
+    `SELKEY_ALLOW_SIMULATED=1` for the default build and documents passing `/dev/sev-guest`.
+    CI checks the `snp` build.
+  - `SELKEY_BIND_ADDR` sets the listen address (default `127.0.0.1`; an invalid value stops
+    startup). The compose file sets `0.0.0.0` in the container and publishes on
+    `127.0.0.1:3100`.
+  - **Sealing (breaking for existing SEV-SNP deployments):** seal format `av-tee-seal-v3`, key
+    policy `0x02`: the sealing key also binds the guest policy and a TCB floor (the committed TCB
+    at sealing time, recorded in the blob). Each runtime has its own sealed key file
+    (`sealed_signing_key.sev-snp`, `sealed_signing_key` for simulated). Keys sealed as
+    `av-tee-seal-v2` are not used; the SEV-SNP runtime generates a new receipt signing key. Clients pinning the old key must re-pin. A rejected
+    sealed key no longer stops every restart; platform failures and TCB rollback still stop
+    startup.
+  - `tee-verifier`: the receipt signature is checked against a pinned relay key
+    (`VerifyOptions::pinned_receipt_key`, `verify_tee_receipt_pinned`); without one the status
+    is `ValidUnpinned`, which `is_valid*` rejects. A key named in `tee_attestation` that differs
+    from the pin is `KeyMismatch`.
+  - `tee-verifier`: `SimulatedQuoteVerifier` reports `QuoteSimulated` (never `QuoteVerified`;
+    use `is_valid_simulated()` in tests). `QuoteVerifier::tee_type()` is new, and
+    `tee_attestation.tee_type` must match it. A simulated quote in a `TEE_ATTESTED` receipt is
+    rejected.
+  - `tee-verifier`: allowlist entries take `platform` (`gcp-snp-ovmf`, `snp-direct-boot`,
+    `simulated`) and `description`; `build_id` and `git_rev` are optional. Unknown fields and
+    malformed SEV-SNP measurements are rejected. Populating GCP firmware measurements:
+    docs/deployment.md.
+
 - Transcript v3 (`av-tee-transcript-v3`). Every field is length-prefixed (big-endian u64 length,
   then the bytes) after its field name, so no value can be read as part of another field
   whatever characters it contains. v1 and v2 interpolated values into a JSON-like string without

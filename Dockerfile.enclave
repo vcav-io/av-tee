@@ -6,13 +6,22 @@ COPY packages/ packages/
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 # Source revision bound into the relay configuration hash (transcript v3).
 ARG SELKEY_TEE_GIT_REV=unknown
-RUN SELKEY_TEE_GIT_REV="${SELKEY_TEE_GIT_REV}" cargo build --release -p tee-relay
+# Cargo features for tee-relay. Empty (default) builds the simulated-only
+# relay, which starts only with SELKEY_ALLOW_SIMULATED=1. Build the SEV-SNP
+# runtime with: docker build --build-arg CARGO_FEATURES=snp ...
+ARG CARGO_FEATURES=""
+RUN SELKEY_TEE_GIT_REV="${SELKEY_TEE_GIT_REV}" \
+    cargo build --release -p tee-relay ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
 
 # --- Runtime stage ---
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
-RUN useradd --system --no-create-home selkeytee
+# The data directory must belong to the relay user before VOLUME, so a fresh
+# named volume is created with that ownership and the sealed key can be written.
+RUN useradd --system --no-create-home selkeytee && \
+    mkdir -p /var/lib/selkey-tee && \
+    chown selkeytee:selkeytee /var/lib/selkey-tee
 USER selkeytee
 COPY --from=builder /build/target/release/tee-relay /usr/local/bin/tee-relay
 VOLUME ["/var/lib/selkey-tee"]
