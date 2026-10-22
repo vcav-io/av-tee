@@ -227,13 +227,31 @@ pub struct RelayResult {
     pub receipt: ReceiptV3,
 }
 
-/// Validate JSON output against a JSON Schema.
+/// JSON Schema draft used to validate output against a contract's output schema.
+///
+/// The draft is fixed rather than taken from the schema's `$schema` keyword,
+/// so a schema cannot change what its keywords mean (for example, `const` is
+/// not a draft-04 keyword). The strict inline schema bound in
+/// [`crate::schema_acceptance`] assumes this draft.
+pub const OUTPUT_SCHEMA_DRAFT: jsonschema::Draft = jsonschema::Draft::Draft7;
+
+/// Compile a contract output schema for validation under [`OUTPUT_SCHEMA_DRAFT`].
+pub fn compile_output_schema(
+    schema: &serde_json::Value,
+) -> Result<jsonschema::Validator, RelayError> {
+    jsonschema::options()
+        .with_draft(OUTPUT_SCHEMA_DRAFT)
+        .should_validate_formats(true)
+        .build(schema)
+        .map_err(|e| RelayError::OutputValidation(format!("schema compilation: {e}")))
+}
+
+/// Validate JSON output against a JSON Schema (draft 7).
 fn validate_output_schema(
     output: &serde_json::Value,
     schema: &serde_json::Value,
 ) -> Result<(), RelayError> {
-    let validator = jsonschema::validator_for(schema)
-        .map_err(|e| RelayError::OutputValidation(format!("schema compilation: {e}")))?;
+    let validator = compile_output_schema(schema)?;
 
     if !validator.is_valid(output) {
         let errors: Vec<String> = validator
@@ -734,6 +752,61 @@ mod tests {
         let err = super::parse_decrypted_input(&serde_json::to_vec(&plaintext).unwrap())
             .expect_err("uppercase nonce is rejected");
         assert!(!err.to_string().contains(&nonce));
+    }
+
+    fn const_schema_declaring(draft_uri: &str) -> serde_json::Value {
+        serde_json::json!({
+            "$schema": draft_uri,
+            "type": "object",
+            "properties": { "signal": { "const": "OK" } },
+            "required": ["signal"],
+            "additionalProperties": false
+        })
+    }
+
+    #[test]
+    fn output_validation_enforces_const_whatever_draft_is_declared() {
+        for draft_uri in [
+            "http://json-schema.org/draft-04/schema#",
+            "http://json-schema.org/draft-06/schema#",
+            "http://json-schema.org/draft-07/schema#",
+            "https://json-schema.org/draft/2020-12/schema",
+        ] {
+            let schema = const_schema_declaring(draft_uri);
+            assert!(
+                super::validate_output_schema(&serde_json::json!({"signal": "OK"}), &schema)
+                    .is_ok(),
+                "{draft_uri}: matching const must validate"
+            );
+            for output in [
+                serde_json::json!({"signal": "free text that is not the constant"}),
+                serde_json::json!({"signal": {"nested": [1, 2, 3]}}),
+            ] {
+                assert!(
+                    super::validate_output_schema(&output, &schema).is_err(),
+                    "{draft_uri}: output {output} must fail const"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn output_validation_checks_format_whatever_draft_is_declared() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": { "day": { "type": "string", "maxLength": 10, "format": "date" } },
+            "required": ["day"],
+            "additionalProperties": false
+        });
+        assert!(
+            super::validate_output_schema(&serde_json::json!({"day": "2026-10-22"}), &schema)
+                .is_ok()
+        );
+        assert!(
+            super::validate_output_schema(&serde_json::json!({"day": "free text"}), &schema)
+                .is_err()
+        );
     }
 
     #[test]

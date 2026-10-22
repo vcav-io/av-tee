@@ -96,8 +96,15 @@ const MAX_DEPTH: usize = 32;
 
 /// Keywords accepted in strict inline schemas. Keys starting with `x-` are
 /// annotations and are ignored (including `x-vcav-entropy-bits-upper-bound`).
+///
+/// Output is validated as JSON Schema draft 7 (see
+/// [`crate::relay::OUTPUT_SCHEMA_DRAFT`]), and each keyword here has the
+/// meaning the bound below assumes under that draft. `$schema` is not
+/// accepted: a schema must not select a draft in which these keywords mean
+/// something else (for example, `const` is not a draft-04 keyword).
+/// `pattern` and `format` are accepted: they only narrow strings that are
+/// already bounded by `maxLength` or `enum`.
 const ALLOWED_KEYWORDS: &[&str] = &[
-    "$schema",
     "$comment",
     "title",
     "description",
@@ -126,8 +133,8 @@ const ALLOWED_KEYWORDS: &[&str] = &[
 /// A strict schema:
 /// - is a JSON object at every node (no `true`/`false` schemas) and every node
 ///   declares a single `type`, an `enum`, or a `const`;
-/// - uses only [`ALLOWED_KEYWORDS`] (no composition, references, pattern or
-///   dynamic properties);
+/// - uses only [`ALLOWED_KEYWORDS`] (no `$schema`, composition, references,
+///   `patternProperties` or other dynamic properties);
 /// - sets `additionalProperties: false` on every object and lists every
 ///   property in `required`;
 /// - bounds every string with `enum` or `maxLength`, every array with
@@ -310,6 +317,24 @@ mod tests {
             json!({"type": "object", "properties": {"a": {"anyOf": [{"type": "string"}]}}, "required": ["a"], "additionalProperties": false}),
             json!({"type": "object", "patternProperties": {".*": {"type": "string"}}, "additionalProperties": false}),
         ]
+    }
+
+    #[test]
+    fn schemas_declaring_a_draft_are_rejected() {
+        for draft_uri in [
+            "http://json-schema.org/draft-04/schema#",
+            "http://json-schema.org/draft-07/schema#",
+        ] {
+            let schema = json!({
+                "$schema": draft_uri,
+                "type": "object",
+                "properties": { "signal": { "const": "OK" } },
+                "required": ["signal"],
+                "additionalProperties": false
+            });
+            let err = accept_output_schema(&contract_with(schema, None)).unwrap_err();
+            assert!(err.to_string().contains("$schema"), "{draft_uri}: {err}");
+        }
     }
 
     #[test]
