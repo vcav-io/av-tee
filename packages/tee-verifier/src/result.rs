@@ -18,7 +18,7 @@ pub enum AttestationStatus {
 ///
 /// | Variant | Encoding | Model identity bound? | Relay config bound? |
 /// |---------|----------|-----------------------|---------------------|
-/// | `V3` | length-prefixed | Yes (provider-reported) | Yes — `relay_config_hash` |
+/// | `V3` | length-prefixed | Yes (provider-reported) | Yes — `relay_config_hash` (relay-asserted, not code-attested) |
 /// | `V2` | legacy, interpolated | Yes (provider-reported) | No: code/config unbound |
 /// | `V1` | legacy, interpolated | No — relay-asserted claim only | No: code/config unbound |
 ///
@@ -48,7 +48,9 @@ pub enum TranscriptSchema {
 }
 
 impl TranscriptSchema {
-    /// Whether the transcript binds the relay configuration.
+    /// Whether the transcript binds a relay configuration hash. The
+    /// configuration is asserted by the relay: it is attested only when the
+    /// platform measurement covers the relay code that computed it.
     pub fn binds_relay_config(&self) -> bool {
         matches!(self, TranscriptSchema::V3)
     }
@@ -56,7 +58,7 @@ impl TranscriptSchema {
     /// Short label for display.
     pub fn label(&self) -> &'static str {
         match self {
-            TranscriptSchema::V3 => "transcript v3: relay config bound",
+            TranscriptSchema::V3 => "relay config asserted (not code-attested)",
             TranscriptSchema::V2 | TranscriptSchema::V1 => "code/config unbound",
         }
     }
@@ -71,8 +73,12 @@ pub struct TeeVerificationResult {
     pub transcript_hash_valid: bool,
     pub transcript_binding: TranscriptBinding,
     /// Which transcript schema was used to verify the hash.
-    /// `Some(V3)` means model identity and relay configuration are bound.
-    /// `Some(V2)` means model identity is bound; code/config unbound.
+    /// `Some(V3)` means model identity and a relay configuration hash are
+    /// bound (the configuration is relay-asserted, not code-attested, unless
+    /// the measurement covers the relay code).
+    /// `Some(V2)` means model identity is bound; code/config unbound. With a
+    /// relay config supplied (or v3 required), v1/v2 matches are reported
+    /// here but `transcript_hash_valid` is false.
     /// `Some(V1)` means legacy — model identity is NOT in the transcript.
     /// `None` means neither schema matched (transcript hash invalid).
     pub transcript_schema: Option<TranscriptSchema>,
