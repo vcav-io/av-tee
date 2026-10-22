@@ -105,7 +105,7 @@
   - Echo mode requires `commitment_nonce` too and returns `initiator_input_commitment` /
     `responder_input_commitment` (v3 commitments) instead of `initiator_decrypted_sha256_hex` /
     `responder_decrypted_sha256_hex`.
-  - All vault-family-core dependencies are pinned to `734b885`.
+  - All vault-family-core dependencies are pinned to `3fcfab1`.
   - The transcript (`av-tee-transcript-v2`) and the other `av-tee-*` separators are unchanged.
 - Renamed AgentVault → Selkey. The repo is now `selkey-tee` (formerly `av-tee`).
   This is a clean break with no compatibility aliases:
