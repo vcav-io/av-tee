@@ -9,8 +9,9 @@ measurement doesn't yet cover the relay binary. See [Caveats](#caveats).
 
 ## What it does
 
-The relay is designed to run entirely inside the attested CVM. For each session it computes a transcript hash
-(SHA-512 over canonical JSON) that commits to:
+The relay is designed to run entirely inside the attested CVM. For each session it computes a
+transcript hash (transcript v3, `av-tee-transcript-v3`: SHA-512 over a length-prefixed encoding of
+every field) that commits to:
 
 - the contract hash
 - the prompt template hash
@@ -19,14 +20,34 @@ The relay is designed to run entirely inside the attested CVM. For each session 
 - the receipt signing public key
 - the model identity (provider/model): provider-reported (or the configured model ID if the
   provider omits it)
+- the relay configuration hash (see below)
 
 On a real SEV-SNP CVM, this 64-byte hash goes into the attestation report's `REPORT_DATA` field,
-so the hardware-signed report covers the transcript. See `packages/tee-transcript`.
+so the hardware-signed report covers the transcript. See `packages/tee-transcript` and the golden
+vectors in `tests/fixtures/transcript_v3_golden.json`.
 
 Model identity is **provider-reported**: the relay records the model ID returned by the
 provider's API, or the configured model ID if the provider omits it. Nothing binds or verifies
-which model actually ran. The provider endpoint and model ID are operator configuration and
-aren't bound into the attestation.
+which model actually ran.
+
+### Relay configuration binding
+
+`relay_config_hash` is the SHA-256 of a length-prefixed encoding (`av-tee-relay-config-v1`) of
+the relay's configuration: provider id, provider base URL (`ANTHROPIC_BASE_URL` or the default),
+requested model id, policy lockfile hash and model profile allowlist hash (both empty in
+`tee-relay`, which has neither), the relay's source revision (`SELKEY_TEE_GIT_REV` at build time,
+`unknown` otherwise) and the mode flags (echo, simulated, `SELKEY_ENV`). `GET /tee/info` publishes
+the plaintext `relay_config`, its `relay_config_hash` and the `transcript_version`.
+
+A verifier passes the relay configuration to `tee-verifier` (`VerifyOptions::relay_config`); the
+v3 transcript verifies only if that configuration is the one the relay used. The verifier then
+applies its own policy to the values, for example requiring the provider base URL to be
+`https://api.anthropic.com` and `simulated` to be `false`.
+
+What this shows: which configuration the attested transcript was computed with. What it doesn't
+show: which relay code computed it. On GCP N2D the SNP measurement covers Google's firmware, not
+the relay, so the honest claim for a receipt is "genuine GCP SNP VM; relay code not measured".
+Receipts with v1 or v2 transcripts still verify, labelled "code/config unbound".
 
 Receipts from a real SEV-SNP CVM carry assurance level `TEE_ATTESTED`. Receipts from the
 simulated runtime (development and CI), like those from the software lane, carry `SELF_ASSERTED`.
@@ -63,7 +84,8 @@ it as `receipt`. In the TEE lane:
   vault-family-core. `tee-verifier` checks the TEE-specific fields and accepts v3 and earlier v2
   receipts.
 
-The transcript hash (above) is unchanged by receipt v3.
+The transcript version is independent of the receipt version: receipt v3 receipts issued
+before transcript v3 carry a v2 transcript, and `tee-verifier` still accepts them.
 
 ## Packages
 
@@ -78,9 +100,8 @@ The transcript hash (above) is unchanged by receipt v3.
 ## Status
 
 - The real SEV-SNP runtime (`tee-snp`) was validated on GCP N2D confidential VMs (AMD Milan),
-  where all 20 tests passed (commits `f89dcd3` and `58b58e7`). Later changes, including binding
-  model identity into the transcript (v2), haven't been re-validated on hardware in this repo's
-  history.
+  where all 20 tests passed (commits `f89dcd3` and `58b58e7`). Later changes, including
+  transcripts v2 and v3, haven't been re-validated on hardware in this repo's history.
 - CI runs on standard runners using the simulated runtime.
 
 ## Caveats

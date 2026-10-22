@@ -56,13 +56,19 @@ now. Each depends on measured boot covering the relay (see the note above).
 - Model identity in receipts is provider-reported: the relay records the model ID returned by
   the provider's API (or the configured model ID if the provider omits it), and nothing
   verifies which model ran
-- The provider endpoint and model ID are operator configuration and aren't bound into the
-  attestation
+- The provider endpoint, requested model ID and mode flags are bound into the transcript
+  (v3) through `relay_config_hash`, so a verifier can check which configuration the attested
+  transcript was computed with. This doesn't show which code computed it: the measurement on
+  GCP N2D covers Google's firmware, not the relay ("relay code not measured")
 
 ## Transcript binding assurance levels
 
-The verifier recomputes the transcript hash (SHA-512 over canonical JSON of all
-commitments) and compares it to a reference value from the receipt. The
+The verifier recomputes the transcript hash (v3: SHA-512 over a length-prefixed
+encoding of all commitments and the relay configuration hash; v1/v2: SHA-512 over
+an interpolated JSON-like string) and compares it to a reference value from the
+receipt. `transcript_schema` records which version matched: v3 binds the relay
+configuration (the caller supplies it, and gets it back to apply its own policy);
+v1 and v2 are labelled "code/config unbound". The
 `TranscriptBinding` field in `TeeVerificationResult` records *which* reference
 was used, because the assurance levels differ significantly:
 

@@ -10,8 +10,9 @@ pub use crypto::{build_aad, decrypt_payload};
 // Re-export tee-transcript for backwards compatibility.
 pub use tee_transcript as transcript;
 pub use tee_transcript::{
-    TRANSCRIPT_VERSION, TRANSCRIPT_VERSION_V2, TranscriptInputs, TranscriptInputsV2,
-    compute_transcript_hash, compute_transcript_hash_v2,
+    RelayConfig, TRANSCRIPT_VERSION, TRANSCRIPT_VERSION_V2, TRANSCRIPT_VERSION_V3,
+    TranscriptInputs, TranscriptInputsV2, TranscriptInputsV3, compute_relay_config_hash,
+    compute_transcript_hash, compute_transcript_hash_v2, compute_transcript_hash_v3,
 };
 pub use types::{AttestationReport, EnclaveIdentity, EncryptedPayload};
 

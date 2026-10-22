@@ -9,12 +9,13 @@ use receipt_core::{
     TeeType, TokenUsage, UnsignedReceiptV2, sign_and_assemble_receipt_v2,
 };
 use tee_transcript::{
-    TranscriptInputs, TranscriptInputsV2, compute_transcript_hash, compute_transcript_hash_v2,
+    RelayConfig, TranscriptInputs, TranscriptInputsV2, TranscriptInputsV3, compute_transcript_hash,
+    compute_transcript_hash_v2, compute_transcript_hash_v3,
 };
 use tee_verifier::{
     AttestationHashStatus, AttestationStatus, MeasurementEntry, QuoteVerifyError,
-    SevSnpQuoteVerifier, SimulatedQuoteVerifier, StaticAllowlist, TranscriptSchema,
-    verify_tee_receipt,
+    SevSnpQuoteVerifier, SimulatedQuoteVerifier, StaticAllowlist, TranscriptSchema, VerifyOptions,
+    verify_tee_receipt, verify_tee_receipt_with_options,
 };
 
 // ---------------------------------------------------------------------------
@@ -336,6 +337,10 @@ fn v1_receipt_verifies_with_fallback() {
         Some(TranscriptSchema::V1),
         "v1 receipt should report TranscriptSchema::V1"
     );
+    assert_eq!(
+        result.transcript_schema.as_ref().unwrap().label(),
+        "code/config unbound"
+    );
     assert!(result.is_valid(), "v1 receipt should still be fully valid");
 }
 
@@ -561,7 +566,7 @@ mod snp_vcek_receipt_tests {
         // snp_vcek_cert decodes as base64 but is not valid DER → hard failure
         let snp_measurement = [0xBB_u8; 48];
         let b64 = base64::engine::general_purpose::STANDARD;
-        let garbage_b64 = base64::Engine::encode(&b64, &[0xFF, 0xFE, 0xFD, 0xFC, 0xFB]);
+        let garbage_b64 = base64::Engine::encode(&b64, [0xFF, 0xFE, 0xFD, 0xFC, 0xFB]);
         let (receipt, _key) =
             build_receipt_with_vcek(snp_quote_builder(snp_measurement), Some(garbage_b64));
         let allowlist = allowlist_with(&hex::encode(snp_measurement));
@@ -816,12 +821,50 @@ mod snp_sig_tests {
 // Receipt v3
 // ---------------------------------------------------------------------------
 
-/// Build a signed v3 TEE receipt. `attested_key` is the key named in
+fn test_relay_config() -> RelayConfig {
+    RelayConfig {
+        provider_id: "anthropic".to_string(),
+        provider_base_url: "https://api.anthropic.com".to_string(),
+        model_id_requested: "test-model".to_string(),
+        policy_lockfile_hash: String::new(),
+        model_profile_allowlist_hash: String::new(),
+        relay_git_rev: "0123abc".to_string(),
+        echo_mode: false,
+        simulated: true,
+        env: String::new(),
+    }
+}
+
+fn options_with(relay_config: RelayConfig) -> VerifyOptions {
+    VerifyOptions {
+        relay_config: Some(relay_config),
+        ..VerifyOptions::default()
+    }
+}
+
+/// Build a signed v3 TEE receipt with a v3 transcript bound to
+/// [`test_relay_config`]. `attested_key` is the key named in
 /// `tee_attestation` (and bound into the transcript); `signing_key` signs.
 fn build_v3_receipt(
     quote_builder: QuoteBuilder,
     signing_key: &SigningKey,
     attested_key: &ed25519_dalek::VerifyingKey,
+) -> receipt_core::ReceiptV3 {
+    build_v3_receipt_with_transcript(
+        quote_builder,
+        signing_key,
+        attested_key,
+        Some(&test_relay_config()),
+    )
+}
+
+/// Build a signed v3 TEE receipt. With `relay_config` the transcript is v3;
+/// without, it is the legacy v2 transcript.
+fn build_v3_receipt_with_transcript(
+    quote_builder: QuoteBuilder,
+    signing_key: &SigningKey,
+    attested_key: &ed25519_dalek::VerifyingKey,
+    relay_config: Option<&RelayConfig>,
 ) -> receipt_core::ReceiptV3 {
     use receipt_core::{
         BudgetScope, BudgetUsageV3, CANONICALIZATION_V3, ClaimsV3, CommitmentsV3, ContractHashAlg,
@@ -839,15 +882,27 @@ fn build_v3_receipt(
     let responder_sub_hash = hex::encode(Sha256::digest(b"test-responder-ciphertext"));
     let model_identity_asserted = "anthropic/test-model";
 
-    let transcript_hash = compute_transcript_hash_v2(&TranscriptInputsV2 {
-        contract_hash: &contract_hash,
-        prompt_template_hash: &prompt_template_hash,
-        initiator_submission_hash: &initiator_sub_hash,
-        responder_submission_hash: &responder_sub_hash,
-        output_hash: &output_hash,
-        receipt_signing_pubkey_hex: &pubkey_hex,
-        model_identity_asserted,
-    });
+    let transcript_hash = match relay_config {
+        Some(relay_config) => compute_transcript_hash_v3(&TranscriptInputsV3 {
+            contract_hash: &contract_hash,
+            prompt_template_hash: &prompt_template_hash,
+            initiator_submission_hash: &initiator_sub_hash,
+            responder_submission_hash: &responder_sub_hash,
+            output_hash: &output_hash,
+            receipt_signing_pubkey_hex: &pubkey_hex,
+            model_identity_asserted,
+            relay_config_hash: &relay_config.hash_hex(),
+        }),
+        None => compute_transcript_hash_v2(&TranscriptInputsV2 {
+            contract_hash: &contract_hash,
+            prompt_template_hash: &prompt_template_hash,
+            initiator_submission_hash: &initiator_sub_hash,
+            responder_submission_hash: &responder_sub_hash,
+            output_hash: &output_hash,
+            receipt_signing_pubkey_hex: &pubkey_hex,
+            model_identity_asserted,
+        }),
+    };
     let (quote_bytes, measurement) = quote_builder(&transcript_hash);
     let b64 = base64::engine::general_purpose::STANDARD;
 
@@ -947,16 +1002,107 @@ fn v3_receipt_full_verification() {
     );
     let allowlist = allowlist_with(&simulated_measurement());
 
-    let result = verify_tee_receipt(&receipt, &allowlist, &SimulatedQuoteVerifier).unwrap();
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist,
+        &SimulatedQuoteVerifier,
+        &options_with(test_relay_config()),
+    )
+    .unwrap();
 
     assert_eq!(
         result.signature_status,
         tee_verifier::SignatureStatus::Valid
     );
     assert!(result.transcript_hash_valid);
-    assert_eq!(result.transcript_schema, Some(TranscriptSchema::V2));
+    assert_eq!(result.transcript_schema, Some(TranscriptSchema::V3));
+    assert_eq!(result.relay_config, Some(test_relay_config()));
     assert!(result.submission_hashes_present);
     assert!(result.is_valid());
+}
+
+#[test]
+fn v3_transcript_does_not_verify_without_the_relay_config() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_tee_receipt(&receipt, &allowlist, &SimulatedQuoteVerifier).unwrap();
+
+    assert!(!result.transcript_hash_valid);
+    assert_eq!(result.transcript_schema, None);
+    assert_eq!(result.relay_config, None);
+    assert!(!result.is_valid());
+}
+
+#[test]
+fn v3_transcript_does_not_verify_against_a_different_relay_config() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    for other in [
+        RelayConfig {
+            provider_base_url: "https://api.example.test".to_string(),
+            ..test_relay_config()
+        },
+        RelayConfig {
+            model_id_requested: "other-model".to_string(),
+            ..test_relay_config()
+        },
+        RelayConfig {
+            simulated: false,
+            ..test_relay_config()
+        },
+    ] {
+        let result = verify_tee_receipt_with_options(
+            &receipt,
+            &allowlist,
+            &SimulatedQuoteVerifier,
+            &options_with(other.clone()),
+        )
+        .unwrap();
+        assert!(!result.transcript_hash_valid, "{other:?}");
+        assert_eq!(result.relay_config, None);
+        assert!(!result.is_valid());
+    }
+}
+
+#[test]
+fn v3_receipt_with_legacy_v2_transcript_verifies_labelled_unbound() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt_with_transcript(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+        None,
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    // With or without a relay config, a v2 transcript matches as v2.
+    for options in [VerifyOptions::default(), options_with(test_relay_config())] {
+        let result = verify_tee_receipt_with_options(
+            &receipt,
+            &allowlist,
+            &SimulatedQuoteVerifier,
+            &options,
+        )
+        .unwrap();
+        assert!(result.transcript_hash_valid);
+        let schema = result.transcript_schema.expect("schema");
+        assert_eq!(schema, TranscriptSchema::V2);
+        assert!(!schema.binds_relay_config());
+        assert_eq!(schema.label(), "code/config unbound");
+        assert_eq!(result.relay_config, None);
+    }
 }
 
 #[test]

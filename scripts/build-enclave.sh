@@ -11,7 +11,10 @@ IMAGE_NAME="${IMAGE_NAME:-selkey-tee-relay}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
 
 echo "Building enclave image: ${IMAGE_NAME}:${IMAGE_TAG}"
-docker build -f Dockerfile.enclave -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+GIT_REV="${SELKEY_TEE_GIT_REV:-$(git rev-parse HEAD)}"
+docker build -f Dockerfile.enclave \
+  --build-arg "SELKEY_TEE_GIT_REV=${GIT_REV}" \
+  -t "${IMAGE_NAME}:${IMAGE_TAG}" .
 
 # Extract artifact hash (sha256 of the tee-relay binary)
 CONTAINER_ID=$(docker create "${IMAGE_NAME}:${IMAGE_TAG}")

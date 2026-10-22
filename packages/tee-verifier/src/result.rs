@@ -16,10 +16,14 @@ pub enum AttestationStatus {
 
 /// Which transcript hash schema was used for verification.
 ///
-/// | Variant | Model identity bound? |
-/// |---------|-----------------------|
-/// | `V2` | Yes — `model_identity_asserted` is part of the attested transcript hash |
-/// | `V1` | No — legacy receipt; model identity is a relay-asserted claim only |
+/// | Variant | Encoding | Model identity bound? | Relay config bound? |
+/// |---------|----------|-----------------------|---------------------|
+/// | `V3` | length-prefixed | Yes (provider-reported) | Yes — `relay_config_hash` |
+/// | `V2` | legacy, interpolated | Yes (provider-reported) | No: code/config unbound |
+/// | `V1` | legacy, interpolated | No — relay-asserted claim only | No: code/config unbound |
+///
+/// No schema binds the relay *code*: that depends on what the platform
+/// measurement covers (see the measurement allowlist).
 ///
 /// `None` in `TeeVerificationResult::transcript_schema` means neither schema
 /// matched (transcript hash invalid).
@@ -27,14 +31,35 @@ pub enum AttestationStatus {
 /// **Caller guidance:** `transcript_hash_valid == true` with
 /// `transcript_schema == Some(V1)` means the transcript matched but model
 /// identity was NOT hardware-bound — it is only a relay-asserted claim.
-/// Callers that require model-identity binding MUST check for `Some(V2)`.
+/// Callers that require model-identity binding MUST check for `Some(V2)` or
+/// `Some(V3)`; callers that require relay-config binding MUST check for
+/// `Some(V3)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptSchema {
-    /// Transcript v2: `model_identity_asserted` is included in the hash.
+    /// Transcript v3: length-prefixed encoding of every field, including
+    /// `model_identity_asserted` and the relay configuration hash.
+    V3,
+    /// Transcript v2 (legacy): `model_identity_asserted` is included in the
+    /// hash; relay code and configuration are not bound.
     V2,
     /// Transcript v1 (legacy): `model_identity_asserted` is NOT in the hash.
     /// Model identity is only a relay-asserted claim.
     V1,
+}
+
+impl TranscriptSchema {
+    /// Whether the transcript binds the relay configuration.
+    pub fn binds_relay_config(&self) -> bool {
+        matches!(self, TranscriptSchema::V3)
+    }
+
+    /// Short label for display.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TranscriptSchema::V3 => "transcript v3: relay config bound",
+            TranscriptSchema::V2 | TranscriptSchema::V1 => "code/config unbound",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -46,10 +71,15 @@ pub struct TeeVerificationResult {
     pub transcript_hash_valid: bool,
     pub transcript_binding: TranscriptBinding,
     /// Which transcript schema was used to verify the hash.
-    /// `Some(V2)` means model identity is hardware-bound.
+    /// `Some(V3)` means model identity and relay configuration are bound.
+    /// `Some(V2)` means model identity is bound; code/config unbound.
     /// `Some(V1)` means legacy — model identity is NOT in the transcript.
     /// `None` means neither schema matched (transcript hash invalid).
     pub transcript_schema: Option<TranscriptSchema>,
+    /// The relay configuration the v3 transcript was verified against
+    /// (`Some` only when `transcript_schema == Some(V3)`). Callers apply
+    /// their own policy to it, e.g. the provider base URL.
+    pub relay_config: Option<tee_transcript::RelayConfig>,
     pub submission_hashes_present: bool,
 }
 

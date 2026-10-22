@@ -7,7 +7,7 @@ mod support;
 
 use base64::Engine;
 use sha2::{Digest, Sha256};
-use tee_transcript::{TranscriptInputsV2, compute_transcript_hash_v2};
+use tee_transcript::{TranscriptInputsV3, compute_transcript_hash_v3};
 
 use support::*;
 
@@ -151,12 +151,15 @@ fn assert_no_input_derived_hash(label: &str, value: &serde_json::Value) {
 
 /// Recompute the transcript hash from the receipt and check it is the
 /// attested one: every transcript input is then a receipt field the scan
-/// covers.
-fn assert_transcript_inputs_are_receipt_fields(receipt: &serde_json::Value) {
+/// covers, or the relay configuration hash published at /tee/info.
+fn assert_transcript_inputs_are_receipt_fields(
+    receipt: &serde_json::Value,
+    relay_config_hash: &str,
+) {
     let c = &receipt["commitments"];
     let att = &receipt["tee_attestation"];
     let s = |v: &serde_json::Value| v.as_str().unwrap_or("").to_string();
-    let recomputed = hex::encode(compute_transcript_hash_v2(&TranscriptInputsV2 {
+    let recomputed = hex::encode(compute_transcript_hash_v3(&TranscriptInputsV3 {
         contract_hash: &s(&c["contract_hash"]),
         prompt_template_hash: &s(&c["prompt_template_hash"]),
         initiator_submission_hash: &s(&c["initiator_submission_hash"]),
@@ -164,16 +167,32 @@ fn assert_transcript_inputs_are_receipt_fields(receipt: &serde_json::Value) {
         output_hash: &s(&c["output_hash"]),
         receipt_signing_pubkey_hex: &s(&att["receipt_signing_pubkey_hex"]),
         model_identity_asserted: &s(&receipt["claims"]["model_identity_asserted"]),
+        relay_config_hash,
     }));
     assert_eq!(att["user_data_hex"], recomputed);
     assert_eq!(att["transcript_hash_hex"], recomputed);
 }
 
-/// Run a session; return the create-session response, the output body and
-/// the status body.
-async fn session_output(provider_url: &str) -> (serde_json::Value, String, serde_json::Value) {
+/// Run a session; return the create-session response, the output body, the
+/// status body and the /tee/info body.
+async fn session_output(
+    provider_url: &str,
+) -> (
+    serde_json::Value,
+    String,
+    serde_json::Value,
+    serde_json::Value,
+) {
     let base = start_relay_server(provider_url).await;
     let client = reqwest::Client::new();
+    let info: serde_json::Value = client
+        .get(format!("{base}/tee/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let session = create_session(&client, &base, contract_json()).await;
     let body = run_session(&client, &base, &session, &alice_ctx(), &bob_ctx()).await;
     let status: serde_json::Value = client
@@ -188,7 +207,7 @@ async fn session_output(provider_url: &str) -> (serde_json::Value, String, serde
         .json()
         .await
         .unwrap();
-    (session, body, status)
+    (session, body, status, info)
 }
 
 #[tokio::test]
@@ -202,12 +221,14 @@ async fn no_received_value_is_an_unsalted_hash_of_inputs_or_withheld_output() {
         ("rejected", rejected, "ABORTED"),
         ("failed", failed, "ABORTED"),
     ] {
-        let (session, body, status) = session_output(&url).await;
+        let (session, body, status, info) = session_output(&url).await;
         let output: serde_json::Value = serde_json::from_str(&body).unwrap();
         let receipt = &output["receipt"];
         assert!(receipt.is_object(), "{label} session has a receipt");
 
-        assert_transcript_inputs_are_receipt_fields(receipt);
+        let relay_config_hash = info["relay_config_hash"].as_str().unwrap();
+        assert_transcript_inputs_are_receipt_fields(receipt, relay_config_hash);
+        assert_no_input_derived_hash(&format!("{label} tee info"), &info);
         assert_no_input_derived_hash(&format!("{label} session output"), &output);
         assert_no_input_derived_hash(&format!("{label} create-session response"), &session);
         assert_no_input_derived_hash(&format!("{label} status response"), &status);
@@ -226,7 +247,8 @@ async fn no_received_value_is_an_unsalted_hash_of_inputs_or_withheld_output() {
 #[tokio::test]
 async fn scan_detects_a_planted_input_derived_hash() {
     // Guards the scan above against passing vacuously.
-    let (_, body, _) = session_output(&start_mock_provider(r#"{"decision":"HALT"}"#).await).await;
+    let (_, body, _, _) =
+        session_output(&start_mock_provider(r#"{"decision":"HALT"}"#).await).await;
     let output: serde_json::Value = serde_json::from_str(&body).unwrap();
     for (name, hash) in input_derived_hashes() {
         let mut planted = output.clone();

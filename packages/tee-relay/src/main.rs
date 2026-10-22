@@ -160,6 +160,7 @@ async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::Si
         anthropic_base_url,
         max_completion_tokens,
         operator_id,
+        env: std::env::var("SELKEY_ENV").unwrap_or_default(),
     };
 
     let state = Arc::new(RelayState {

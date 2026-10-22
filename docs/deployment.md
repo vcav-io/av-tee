@@ -29,7 +29,8 @@ bash scripts/build-enclave.sh
 | `SELKEY_SIGNING_KEY_HEX` | (auto) | Override signing key (dev only) |
 | `ANTHROPIC_API_KEY` | (none) | Anthropic API key for relay mode |
 | `SELKEY_MODEL_ID` | `claude-sonnet-4-5-20250929` | Model to use |
-| `ANTHROPIC_BASE_URL` | (default) | Custom API base URL |
+| `ANTHROPIC_BASE_URL` | (default) | Custom API base URL. Bound into the transcript through `relay_config_hash` |
+| `SELKEY_ENV` | (unset) | Environment label, bound into the transcript through `relay_config_hash` |
 | `SELKEY_MAX_COMPLETION_TOKENS` | `4096` | Max completion tokens |
 | `SELKEY_OPERATOR_ID` | `selkey-tee-relay-dev` | Operator identifier in receipts |
 | `SELKEY_SESSION_TTL_SECS` | `600` | Session timeout in seconds |

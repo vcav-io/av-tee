@@ -6,6 +6,11 @@ use super::{ProviderRequest, ProviderResponse};
 use crate::error::RelayError;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+/// The base URL provider requests go to: the configured one, or the default.
+pub fn effective_base_url(configured: Option<&str>) -> String {
+    configured.unwrap_or(DEFAULT_BASE_URL).to_string()
+}
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -62,7 +67,7 @@ impl AnthropicProvider {
             client,
             api_key,
             model_id,
-            base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            base_url: effective_base_url(base_url.as_deref()),
         })
     }
 

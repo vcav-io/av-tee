@@ -4,7 +4,8 @@ use sha2::{Digest, Sha256};
 
 use receipt_core::{ReceiptV2, ReceiptV3, TeeAttestation};
 use tee_transcript::{
-    TranscriptInputs, TranscriptInputsV2, compute_transcript_hash, compute_transcript_hash_v2,
+    RelayConfig, TranscriptInputs, TranscriptInputsV2, TranscriptInputsV3, compute_transcript_hash,
+    compute_transcript_hash_v2, compute_transcript_hash_v3,
 };
 
 use crate::allowlist::TransparencySource;
@@ -92,6 +93,22 @@ impl<'a> TeeReceipt<'a> {
     }
 }
 
+/// Verification inputs beyond the receipt itself.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyOptions {
+    /// SEV-SNP platform checks.
+    pub snp: VerificationConfig,
+    /// Relay configuration to check a v3 transcript against.
+    ///
+    /// Transcript v3 binds `relay_config_hash`, which the receipt does not
+    /// carry, so a v3 transcript verifies only when the caller supplies the
+    /// configuration (for example the `relay_config` published at the relay's
+    /// `/tee/info`, or one the caller expects). On a match the configuration
+    /// is returned in [`TeeVerificationResult::relay_config`], so the caller
+    /// can apply its own policy to it.
+    pub relay_config: Option<RelayConfig>,
+}
+
 pub fn verify_tee_receipt<'a>(
     receipt: impl Into<TeeReceipt<'a>>,
     allowlist: &dyn TransparencySource,
@@ -111,6 +128,24 @@ pub fn verify_tee_receipt_with_config<'a>(
     quote_verifier: &dyn QuoteVerifier,
     config: &VerificationConfig,
 ) -> Result<TeeVerificationResult, VerifyError> {
+    verify_tee_receipt_with_options(
+        receipt,
+        allowlist,
+        quote_verifier,
+        &VerifyOptions {
+            snp: config.clone(),
+            ..VerifyOptions::default()
+        },
+    )
+}
+
+pub fn verify_tee_receipt_with_options<'a>(
+    receipt: impl Into<TeeReceipt<'a>>,
+    allowlist: &dyn TransparencySource,
+    quote_verifier: &dyn QuoteVerifier,
+    options: &VerifyOptions,
+) -> Result<TeeVerificationResult, VerifyError> {
+    let config = &options.snp;
     let receipt = receipt.into();
     let fields = receipt.fields();
     let tee_att = fields
@@ -211,8 +246,10 @@ pub fn verify_tee_receipt_with_config<'a>(
 
     // 4. Recompute transcript hash, compare to user_data_hex
     //
-    // Try v2 first (model identity bound), then fall back to v1 for legacy
-    // receipts. The `transcript_schema` field tells callers which schema matched.
+    // Try v3 (relay config bound; needs the caller-supplied relay config),
+    // then v2 (model identity bound), then v1. v1 and v2 are legacy
+    // encodings kept so receipts issued before v3 still verify; they bind
+    // neither relay code nor relay configuration.
     let (transcript_hash_valid, transcript_binding, transcript_schema) = {
         let contract_hash = fields.contract_hash;
         let prompt_template_hash = fields.prompt_template_hash.unwrap_or("");
@@ -222,8 +259,21 @@ pub fn verify_tee_receipt_with_config<'a>(
         let pubkey_hex = tee_att.receipt_signing_pubkey_hex.as_deref().unwrap_or("");
         let model_id = fields.model_identity_asserted.unwrap_or("");
 
-        // V2 hash (includes model_identity_asserted)
-        let v2_inputs = TranscriptInputsV2 {
+        let v3_hex = options.relay_config.as_ref().map(|relay_config| {
+            let relay_config_hash = relay_config.hash_hex();
+            hex::encode(compute_transcript_hash_v3(&TranscriptInputsV3 {
+                contract_hash,
+                prompt_template_hash,
+                initiator_submission_hash: initiator_sub,
+                responder_submission_hash: responder_sub,
+                output_hash,
+                receipt_signing_pubkey_hex: pubkey_hex,
+                model_identity_asserted: model_id,
+                relay_config_hash: &relay_config_hash,
+            }))
+        });
+
+        let v2_hex = hex::encode(compute_transcript_hash_v2(&TranscriptInputsV2 {
             contract_hash,
             prompt_template_hash,
             initiator_submission_hash: initiator_sub,
@@ -231,65 +281,42 @@ pub fn verify_tee_receipt_with_config<'a>(
             output_hash,
             receipt_signing_pubkey_hex: pubkey_hex,
             model_identity_asserted: model_id,
-        };
-        let v2_hex = hex::encode(compute_transcript_hash_v2(&v2_inputs));
+        }));
 
-        // V1 hash (legacy, no model identity)
-        let v1_inputs = TranscriptInputs {
+        let v1_hex = hex::encode(compute_transcript_hash(&TranscriptInputs {
             contract_hash,
             prompt_template_hash,
             initiator_submission_hash: initiator_sub,
             responder_submission_hash: responder_sub,
             output_hash,
             receipt_signing_pubkey_hex: pubkey_hex,
+        }));
+
+        let schema_for = |target: &str| {
+            if v3_hex.as_deref() == Some(target) {
+                Some(TranscriptSchema::V3)
+            } else if v2_hex == target {
+                Some(TranscriptSchema::V2)
+            } else if v1_hex == target {
+                Some(TranscriptSchema::V1)
+            } else {
+                None
+            }
         };
-        let v1_hex = hex::encode(compute_transcript_hash(&v1_inputs));
 
         // Compare against user_data_hex (the platform attestation binding),
         // falling back to transcript_hash_hex with explicit tracking of which
         // field was used so callers can distinguish assurance levels.
-        //
-        // Within each binding target, try v2 first then v1.
-        let (hash_valid, binding, schema) = match &tee_att.user_data_hex {
-            Some(user_data) => {
-                if v2_hex == *user_data {
-                    (
-                        true,
-                        TranscriptBinding::UserData,
-                        Some(TranscriptSchema::V2),
-                    )
-                } else if v1_hex == *user_data {
-                    (
-                        true,
-                        TranscriptBinding::UserData,
-                        Some(TranscriptSchema::V1),
-                    )
-                } else {
-                    (false, TranscriptBinding::UserData, None)
-                }
-            }
-            None => match &tee_att.transcript_hash_hex {
-                Some(th) => {
-                    if v2_hex == *th {
-                        (
-                            true,
-                            TranscriptBinding::TranscriptHashFallback,
-                            Some(TranscriptSchema::V2),
-                        )
-                    } else if v1_hex == *th {
-                        (
-                            true,
-                            TranscriptBinding::TranscriptHashFallback,
-                            Some(TranscriptSchema::V1),
-                        )
-                    } else {
-                        (false, TranscriptBinding::TranscriptHashFallback, None)
-                    }
-                }
-                None => (false, TranscriptBinding::None, None),
-            },
+        let (binding, schema) = match (&tee_att.user_data_hex, &tee_att.transcript_hash_hex) {
+            (Some(user_data), _) => (TranscriptBinding::UserData, schema_for(user_data)),
+            (None, Some(th)) => (TranscriptBinding::TranscriptHashFallback, schema_for(th)),
+            (None, None) => (TranscriptBinding::None, None),
         };
-        (hash_valid, binding, schema)
+        (schema.is_some(), binding, schema)
+    };
+    let relay_config = match transcript_schema {
+        Some(TranscriptSchema::V3) => options.relay_config.clone(),
+        _ => None,
     };
 
     // 5. Check submission hashes present
@@ -304,6 +331,7 @@ pub fn verify_tee_receipt_with_config<'a>(
         transcript_hash_valid,
         transcript_binding,
         transcript_schema,
+        relay_config,
         submission_hashes_present,
     })
 }
