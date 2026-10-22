@@ -193,9 +193,10 @@ fn each_runtime_has_its_own_sealed_key_file() {
         sealed_key_file_name(TeeType::Simulated),
         "sealed_signing_key"
     );
-    let snp = sealed_key_file_name(TeeType::SevSnp);
-    assert_ne!(snp, sealed_key_file_name(TeeType::Simulated));
-    assert!(snp.starts_with("sealed_signing_key."), "{snp}");
+    assert_eq!(
+        sealed_key_file_name(TeeType::SevSnp),
+        "sealed_signing_key.sev-snp"
+    );
 }
 
 #[tokio::test]

@@ -158,8 +158,12 @@ impl TeeVerificationResult {
     ///   code-attested)";
     /// - valid v1/v2 transcripts: "code/config unbound";
     /// - no valid transcript: `None`.
+    ///
+    /// Returns `None` unless all receipt-level checks pass
+    /// ([`Self::is_valid_sans_quote`]): a claim is never made for a receipt
+    /// with a bad signature, an unpinned key or an unknown measurement.
     pub fn relay_config_claim(&self) -> Option<&'static str> {
-        if !self.transcript_hash_valid {
+        if !self.is_valid_sans_quote() {
             return None;
         }
         match self.transcript_schema {
