@@ -44,7 +44,10 @@
     `transcript_version`, `relay_config` and `relay_config_hash`.
   - `tee-verifier` verifies v3 transcripts when the caller supplies the relay configuration
     (`verify_tee_receipt_with_options`, `VerifyOptions::relay_config`), and returns the matched
-    configuration. v1 and v2 transcripts still verify and are labelled "code/config unbound".
+    configuration. v1 and v2 transcripts still verify and are labelled "code/config unbound",
+    except when a relay config is supplied (or `require_transcript_v3` is set), where they are
+    invalid. A v3 match is labelled "relay config asserted (not code-attested)".
+  - `ANTHROPIC_BASE_URL` with user info, a query or a fragment stops startup.
   - Golden vectors, including pairs of inputs with quote and delimiter characters that collide
     under the v2 encoding: `tests/fixtures/transcript_v3_golden.json`.
   - Build-time `SELKEY_TEE_GIT_REV` records the source revision; runtime `SELKEY_ENV` is bound
