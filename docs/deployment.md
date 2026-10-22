@@ -53,12 +53,15 @@ curl -s http://localhost:3100/tee/info | jq .
 Before using in production:
 
 1. **Real CVM**: Deploy on AMD SEV-SNP or equivalent. `SimulatedCvm` provides
-   no hardware isolation.
+   no hardware isolation. The image built from `Dockerfile.enclave` doesn't enable the
+   `snp` feature, so it always runs `SimulatedCvm`.
 2. **Measurement verification**: Publish measurements via transparency log or
    static allowlist. Verifiers must check measurements.
 3. **Key lifecycle**: The sealed signing key persists across restarts. See
    `docs/key-rotation.md` for rotation procedures.
-4. **Network isolation**: The relay binds to `127.0.0.1` by default. Use a
-   reverse proxy for external access.
+4. **Network isolation**: The relay binds to `127.0.0.1:$SELKEY_PORT` (default 3100), and
+   there's currently no setting to change the bind address. Inside a container that means
+   Docker's port mapping (as in `docker-compose.tee.yml`) can't reach it; a reverse proxy
+   or other forwarder inside the same network namespace is needed for external access.
 5. **Monitoring**: The relay logs metadata (session IDs, error types) but never
    plaintext. All log lines are annotated with `// SAFETY: no plaintext`.

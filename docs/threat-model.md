@@ -4,11 +4,20 @@
 
 | Threat | Protection | Mechanism |
 |--------|-----------|-----------|
-| Operator reading plaintext | CVM memory encryption | SEV-SNP encrypted VM RAM |
-| Host OS tampering | Attestation + measurement | Code identity bound to attestation report |
+| Operator reading plaintext | CVM memory encryption (not guaranteed yet) | SEV-SNP encrypted VM RAM; doesn't help if the operator can run different guest code, which depends on measured boot covering the relay |
+| Host OS tampering | Attestation + measurement | Launch measurement in the attestation report (see note below) |
 | Co-tenant side-loading | VM isolation | CVM is a separate VM with own address space |
-| Binary tampering | Measurement verification | Verifiers check measurement against allowlist |
-| Key injection by operator | Seal/unseal lifecycle | Signing key generated inside CVM, sealed to platform |
+| Binary tampering | Measurement verification (not yet effective) | Verifiers check measurement against allowlist; the measurement does not yet cover the relay binary |
+| Key injection by operator | Seal/unseal lifecycle (not guaranteed yet) | Signing key generated inside CVM, sealed to platform; depends on measured boot covering the relay |
+
+These protections apply only to a real SEV-SNP CVM. The shipped container image runs the
+simulated runtime (see the README).
+
+**Note on measurement coverage:** the SNP launch measurement covers what the hypervisor loads
+at launch. Without measured boot (kernel, initrd, command line and a verified root filesystem),
+it does not cover the relay binary, and on a typical setup running the relay in Docker it most
+likely covers the guest firmware only. Until measured boot is in place, a known-good
+measurement does not identify the relay code that ran.
 
 ## What the CVM does NOT protect
 
@@ -26,10 +35,12 @@
 The relay is designed so that the operator (whoever runs the CVM) cannot
 observe session plaintext even though they provision the infrastructure.
 
-**Guarantees (with real CVM):**
-- Operator cannot read RAM (SEV-SNP memory encryption)
-- Operator cannot inject a different binary (measurement verification)
-- Operator cannot inject a signing key (seal/unseal lifecycle)
+**Intended guarantees (with real CVM).** These are not met yet: the operator is trusted for
+now. Each depends on measured boot covering the relay (see the note above).
+- Operator cannot read RAM (SEV-SNP memory encryption): **not guaranteed yet**, because
+  memory encryption doesn't help if the operator can run different guest code
+- Operator cannot inject a different binary: **not guaranteed yet**
+- Operator cannot inject a signing key (seal/unseal lifecycle): **not guaranteed yet**
 - Session keys are per-session ephemeral ECDH (forward secrecy)
 
 **Guarantees (software only, simulated mode):**
@@ -40,7 +51,13 @@ observe session plaintext even though they provision the infrastructure.
 **NOT guaranteed:**
 - Operator can observe network traffic metadata (connection times, sizes)
 - Operator can deny service (stop the relay, block network)
-- A compromised relay binary could exfiltrate data (mitigated by measurement)
+- A compromised or substituted relay binary could exfiltrate data (measurement does not yet
+  detect this)
+- Model identity in receipts is provider-reported: the relay records the model ID returned by
+  the provider's API (or the configured model ID if the provider omits it), and nothing
+  verifies which model ran
+- The provider endpoint and model ID are operator configuration and aren't bound into the
+  attestation
 
 ## Transcript binding assurance levels
 
@@ -51,7 +68,7 @@ was used, because the assurance levels differ significantly:
 
 | Binding | Source field | Assurance | When it occurs |
 |---------|-------------|-----------|----------------|
-| **UserData** | `tee_attestation.user_data_hex` | Hardware-bound — the hash is inside the SEV-SNP attestation report, signed by the platform. Proves the transcript was committed by code running in the measured CVM. | Real CVM with attestation support |
+| **UserData** | `tee_attestation.user_data_hex` | Hardware-bound — the hash is inside the SEV-SNP attestation report, signed by the platform. Shows the report was requested by code in a CVM with this launch measurement (which doesn't yet cover the relay binary). | Real CVM with attestation support |
 | **TranscriptHashFallback** | `tee_attestation.transcript_hash_hex` | Relay-asserted — the hash is correct but set by the relay software, not bound into the attestation. A compromised relay could substitute a different hash without detection. | Simulated mode, or real CVM before `user_data` binding was deployed |
 | **None** | *(neither field present)* | Unverifiable — no reference exists to compare against. | Malformed or very old receipts |
 
