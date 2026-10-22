@@ -104,8 +104,10 @@ impl<'a> TeeReceipt<'a> {
 /// Verification inputs beyond the receipt itself.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyOptions {
-    /// SEV-SNP platform checks.
-    pub snp: VerificationConfig,
+    /// SEV-SNP platform checks, including the minimum TCB. Required to verify
+    /// an SEV-SNP certificate chain: without it, a receipt that carries a
+    /// VCEK is reported as `QuoteInvalid(TcbPolicyRequired)`.
+    pub snp: Option<VerificationConfig>,
     /// Relay configuration to check a v3 transcript against.
     ///
     /// Transcript v3 binds `relay_config_hash`, which the receipt does not
@@ -114,7 +116,14 @@ pub struct VerifyOptions {
     /// `/tee/info`, or one the caller expects). On a match the configuration
     /// is returned in [`TeeVerificationResult::relay_config`], so the caller
     /// can apply its own policy to it.
+    ///
+    /// Supplying a relay config also requires transcript v3: a v1 or v2
+    /// transcript match is then reported as invalid, so a receipt cannot
+    /// avoid the configuration check by carrying a legacy transcript.
     pub relay_config: Option<RelayConfig>,
+    /// Require a v3 transcript even without a relay config (in which case
+    /// no transcript can verify). Implied when `relay_config` is set.
+    pub require_transcript_v3: bool,
     /// The relay's receipt signing key, from the caller's configuration.
     ///
     /// The receipt signature is checked against this key, and
@@ -146,19 +155,19 @@ pub fn verify_tee_receipt_pinned<'a>(
     )
 }
 
-/// Verify without a pinned key. The signature status is at best
-/// [`SignatureStatus::ValidUnpinned`], so the result is never `is_valid*`.
-/// Prefer [`verify_tee_receipt_pinned`].
+/// Verify without a pinned key or SEV-SNP settings. The signature status is
+/// at best [`SignatureStatus::ValidUnpinned`], so the result is never
+/// `is_valid*`. Prefer [`verify_tee_receipt_with_options`].
 pub fn verify_tee_receipt<'a>(
     receipt: impl Into<TeeReceipt<'a>>,
     allowlist: &dyn TransparencySource,
     quote_verifier: &dyn QuoteVerifier,
 ) -> Result<TeeVerificationResult, VerifyError> {
-    verify_tee_receipt_with_config(
+    verify_tee_receipt_with_options(
         receipt,
         allowlist,
         quote_verifier,
-        &VerificationConfig::default(),
+        &VerifyOptions::default(),
     )
 }
 
@@ -173,7 +182,7 @@ pub fn verify_tee_receipt_with_config<'a>(
         allowlist,
         quote_verifier,
         &VerifyOptions {
-            snp: config.clone(),
+            snp: Some(config.clone()),
             ..VerifyOptions::default()
         },
     )
@@ -185,7 +194,6 @@ pub fn verify_tee_receipt_with_options<'a>(
     quote_verifier: &dyn QuoteVerifier,
     options: &VerifyOptions,
 ) -> Result<TeeVerificationResult, VerifyError> {
-    let config = &options.snp;
     let receipt = receipt.into();
     let fields = receipt.fields();
     let tee_att = fields
@@ -292,9 +300,17 @@ pub fn verify_tee_receipt_with_options<'a>(
                         .as_ref()
                         .and_then(|q| b64.decode(q).ok())
                         .unwrap_or_default();
-                    match snp_chain::verify_snp_attestation(&quote_bytes, &vcek_der, config) {
-                        Ok(()) => AttestationStatus::QuoteVerified,
-                        Err(e) => AttestationStatus::QuoteInvalid(e),
+                    match &options.snp {
+                        None => {
+                            AttestationStatus::QuoteInvalid(QuoteVerifyError::TcbPolicyRequired)
+                        }
+                        Some(config) => {
+                            match snp_chain::verify_snp_attestation(&quote_bytes, &vcek_der, config)
+                            {
+                                Ok(()) => AttestationStatus::QuoteVerified,
+                                Err(e) => AttestationStatus::QuoteInvalid(e),
+                            }
+                        }
                     }
                 }
             }
@@ -321,7 +337,9 @@ pub fn verify_tee_receipt_with_options<'a>(
     // Try v3 (relay config bound; needs the caller-supplied relay config),
     // then v2 (model identity bound), then v1. v1 and v2 are legacy
     // encodings kept so receipts issued before v3 still verify; they bind
-    // neither relay code nor relay configuration.
+    // neither relay code nor relay configuration, and they do not count as
+    // valid when the caller supplied a relay config or required v3.
+    // `transcript_schema` still reports which encoding matched.
     let (transcript_hash_valid, transcript_binding, transcript_schema) = {
         let contract_hash = fields.contract_hash;
         let prompt_template_hash = fields.prompt_template_hash.unwrap_or("");
@@ -384,7 +402,15 @@ pub fn verify_tee_receipt_with_options<'a>(
             (None, Some(th)) => (TranscriptBinding::TranscriptHashFallback, schema_for(th)),
             (None, None) => (TranscriptBinding::None, None),
         };
-        (schema.is_some(), binding, schema)
+        // With a relay config (or an explicit requirement), only v3 counts:
+        // a legacy transcript would skip the configuration check.
+        let v3_required = options.require_transcript_v3 || options.relay_config.is_some();
+        let valid = match schema {
+            Some(TranscriptSchema::V3) => true,
+            Some(_) => !v3_required,
+            None => false,
+        };
+        (valid, binding, schema)
     };
     let relay_config = match transcript_schema {
         Some(TranscriptSchema::V3) => options.relay_config.clone(),

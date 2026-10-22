@@ -5,7 +5,8 @@
 The TEE relay's Ed25519 signing key is sealed to the CVM. Rotation happens
 by restarting the enclave with the sealed key file removed:
 
-1. Delete `/var/lib/selkey-tee/sealed_signing_key`
+1. Move aside `/var/lib/selkey-tee/sealed_signing_key.sev-snp` (`sealed_signing_key` for the
+   simulated runtime)
 2. Restart the relay process
 3. A new key is generated, sealed, and used for all subsequent receipts
 
@@ -55,8 +56,8 @@ it matches a relay key the verifier trusts (see the caveat above).
 docker compose stop tee-relay
 
 # 2. Move the sealed key aside (keep it until no receipts signed with it need checking)
-docker compose exec tee-relay mv /var/lib/selkey-tee/sealed_signing_key \
-  /var/lib/selkey-tee/sealed_signing_key.retired
+docker compose exec tee-relay mv /var/lib/selkey-tee/sealed_signing_key.sev-snp \
+  /var/lib/selkey-tee/sealed_signing_key.sev-snp.retired
 
 # 3. Restart — new key is generated and sealed
 docker compose start tee-relay

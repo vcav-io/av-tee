@@ -6,6 +6,26 @@ use super::{ProviderRequest, ProviderResponse};
 use crate::error::RelayError;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+/// Check a configured provider base URL before it is used or published.
+///
+/// The base URL is published in the relay configuration at `/tee/info`, so
+/// it must not carry credentials or other request data: user info, a query
+/// string and a fragment are refused. Only `http` and `https` are accepted.
+pub fn validate_base_url(base_url: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(base_url)
+        .map_err(|_| "ANTHROPIC_BASE_URL is not a valid URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("ANTHROPIC_BASE_URL must use http or https".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("ANTHROPIC_BASE_URL must not contain user info".to_string());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("ANTHROPIC_BASE_URL must not contain a query or fragment".to_string());
+    }
+    Ok(())
+}
+
 /// The base URL provider requests go to: the configured one, or the default.
 pub fn effective_base_url(configured: Option<&str>) -> String {
     configured.unwrap_or(DEFAULT_BASE_URL).to_string()
@@ -174,6 +194,23 @@ fn extract_text(response: &Value) -> Result<String, RelayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_url_with_credentials_or_query_is_refused() {
+        for bad in [
+            "https://user:secret@api.example.test",
+            "https://user@api.example.test",
+            "https://api.example.test/?key=secret",
+            "https://api.example.test/#frag",
+            "ftp://api.example.test",
+            "not a url",
+        ] {
+            assert!(validate_base_url(bad).is_err(), "{bad}");
+        }
+        validate_base_url("https://api.anthropic.com").unwrap();
+        validate_base_url("http://127.0.0.1:8080/proxy").unwrap();
+        assert!(validate_base_url(DEFAULT_BASE_URL).is_ok());
+    }
 
     #[test]
     fn strip_unsupported_keywords_removes_correctly() {

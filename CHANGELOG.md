@@ -27,6 +27,10 @@
   - VCEK and ASK validity windows (`VerificationConfig::verification_time`) and an optional
     `RevocationCheck` hook (`RevokedSerials`).
   - Report versions 2 to 5 are accepted (the checked fields have the same offsets).
+  - No default TCB policy: `TcbPolicy` and `VerificationConfig` no longer implement `Default`.
+    Build `VerificationConfig::new(TcbPolicy::minimums(..))`; `VerifyOptions::snp` is an
+    `Option`, and a receipt with a VCEK but no configuration is `QuoteInvalid(TcbPolicyRequired)`.
+  - Milan and Genoa only (no Turin).
 
 - TEE runtime hardening:
   - The relay no longer falls back to the simulated runtime silently. A build without `snp`
@@ -40,9 +44,9 @@
     `127.0.0.1:3100`.
   - **Sealing (breaking for existing SEV-SNP deployments):** seal format `av-tee-seal-v3`, key
     policy `0x02`: the sealing key also binds the guest policy and a TCB floor (the committed TCB
-    at sealing time, recorded in the blob). Keys sealed as `av-tee-seal-v2` cannot be unsealed;
-    on first start the relay moves the old file aside and generates a new receipt signing key
-    (or exits with `SELKEY_SEAL_STRICT=1`). Clients pinning the old key must re-pin. A rejected
+    at sealing time, recorded in the blob). Each runtime has its own sealed key file
+    (`sealed_signing_key.sev-snp`, `sealed_signing_key` for simulated). Keys sealed as
+    `av-tee-seal-v2` are not used; the SEV-SNP runtime generates a new receipt signing key. Clients pinning the old key must re-pin. A rejected
     sealed key no longer stops every restart; platform failures and TCB rollback still stop
     startup.
   - `tee-verifier`: the receipt signature is checked against a pinned relay key
@@ -68,7 +72,10 @@
     `transcript_version`, `relay_config` and `relay_config_hash`.
   - `tee-verifier` verifies v3 transcripts when the caller supplies the relay configuration
     (`verify_tee_receipt_with_options`, `VerifyOptions::relay_config`), and returns the matched
-    configuration. v1 and v2 transcripts still verify and are labelled "code/config unbound".
+    configuration. v1 and v2 transcripts still verify and are labelled "code/config unbound",
+    except when a relay config is supplied (or `require_transcript_v3` is set), where they are
+    invalid. A v3 match is labelled "relay config asserted (not code-attested)".
+  - `ANTHROPIC_BASE_URL` with user info, a query or a fragment stops startup.
   - Golden vectors, including pairs of inputs with quote and delimiter characters that collide
     under the v2 encoding: `tests/fixtures/transcript_v3_golden.json`.
   - Build-time `SELKEY_TEE_GIT_REV` records the source revision; runtime `SELKEY_ENV` is bound

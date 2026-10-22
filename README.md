@@ -44,10 +44,15 @@ v3 transcript verifies only if that configuration is the one the relay used. The
 applies its own policy to the values, for example requiring the provider base URL to be
 `https://api.anthropic.com` and `simulated` to be `false`.
 
-What this shows: which configuration the attested transcript was computed with. What it doesn't
-show: which relay code computed it. On GCP N2D the SNP measurement covers Google's firmware, not
-the relay, so the honest claim for a receipt is "genuine GCP SNP VM; relay code not measured".
-Receipts with v1 or v2 transcripts still verify, labelled "code/config unbound".
+What this shows: which configuration the relay *states* the attested transcript was computed
+with. It doesn't show which relay code computed it, and so it doesn't show that the stated
+configuration is the one in use: on GCP N2D the SNP measurement covers Google's firmware, not
+the relay, so the `relay_config` at `/tee/info` and the bound hash are operator-asserted. The
+verifier labels a v3 match "relay config asserted (not code-attested)", and the honest claim for
+a receipt is "genuine GCP SNP VM; relay code not measured". When a relay config is supplied, a
+receipt with a v1 or v2 transcript does not verify (it can't be checked against the config);
+without one, such receipts still verify, labelled "code/config unbound". `ANTHROPIC_BASE_URL`
+must not contain user info, a query or a fragment; the relay refuses to start otherwise.
 
 Receipts from a real SEV-SNP CVM carry assurance level `TEE_ATTESTED`. Receipts from the
 simulated runtime (development and CI), like those from the software lane, carry `SELF_ASSERTED`.

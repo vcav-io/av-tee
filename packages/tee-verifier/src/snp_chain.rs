@@ -52,8 +52,10 @@ pub enum ProductFamily {
 /// Minimum TCB component versions, checked against the report's
 /// REPORTED_TCB (the TCB the VCEK certifies).
 ///
-/// The default rejects only an all-zero TCB. Deployments should set floors
-/// from AMD's current security bulletins for the product family they run on.
+/// There is no default: callers choose a policy. Use [`TcbPolicy::minimums`]
+/// with floors from AMD's current security bulletins for the product family
+/// in use. [`TcbPolicy::reject_all_zero`] accepts any non-zero TCB and is not
+/// a floor.
 #[derive(Debug, Clone)]
 pub struct TcbPolicy {
     pub boot_loader_min: u8,
@@ -63,8 +65,19 @@ pub struct TcbPolicy {
 }
 
 impl TcbPolicy {
-    /// Default policy: reject all-zero TCB components.
-    /// An all-zero TCB usually indicates an uninitialized or debug platform.
+    /// Floors for each TCB component.
+    pub fn minimums(boot_loader_min: u8, tee_min: u8, snp_min: u8, microcode_min: u8) -> Self {
+        Self {
+            boot_loader_min,
+            tee_min,
+            snp_min,
+            microcode_min,
+        }
+    }
+
+    /// Reject only an all-zero TCB (an uninitialized or debug platform).
+    /// Accepts any other TCB, however old: not a floor. For tests and for
+    /// callers that check the TCB themselves.
     pub fn reject_all_zero() -> Self {
         Self {
             boot_loader_min: 0,
@@ -141,7 +154,9 @@ impl RevocationCheck for RevokedSerials {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+/// SEV-SNP verification settings. There is no `Default`: build one with
+/// [`VerificationConfig::new`] and an explicit [`TcbPolicy`].
+#[derive(Debug, Clone)]
 pub struct VerificationConfig {
     pub tcb_policy: TcbPolicy,
     pub report_policy: ReportPolicy,
@@ -151,9 +166,16 @@ pub struct VerificationConfig {
     pub revocation: Option<Arc<dyn RevocationCheck>>,
 }
 
-impl Default for TcbPolicy {
-    fn default() -> Self {
-        Self::reject_all_zero()
+impl VerificationConfig {
+    /// Settings with `tcb_policy`, the default [`ReportPolicy`], the current
+    /// time and no revocation check.
+    pub fn new(tcb_policy: TcbPolicy) -> Self {
+        Self {
+            tcb_policy,
+            report_policy: ReportPolicy::default(),
+            verification_time: None,
+            revocation: None,
+        }
     }
 }
 
@@ -584,7 +606,7 @@ mod tests {
         let vcek_der = cert.der().to_vec();
 
         let report = vec![0u8; 1184];
-        let config = VerificationConfig::default();
+        let config = VerificationConfig::new(TcbPolicy::reject_all_zero());
 
         let err = verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
         assert!(matches!(
@@ -597,7 +619,7 @@ mod tests {
     fn malformed_vcek_der_rejected() {
         let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
         let report = vec![0u8; 1184];
-        let config = VerificationConfig::default();
+        let config = VerificationConfig::new(TcbPolicy::reject_all_zero());
 
         let err = verify_snp_attestation(&report, &garbage, &config).unwrap_err();
         assert!(matches!(
@@ -721,7 +743,7 @@ mod report_vcek_tests {
                 std::time::UNIX_EPOCH
                     + std::time::Duration::from_secs(((y - 1970) as u64) * 365 * 86_400),
             ),
-            ..VerificationConfig::default()
+            ..VerificationConfig::new(TcbPolicy::reject_all_zero())
         }
     }
 

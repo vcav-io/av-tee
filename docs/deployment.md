@@ -48,20 +48,23 @@ Build with the `snp` feature (`--build-arg CARGO_FEATURES=snp`, or
 ## Sealed signing key
 
 On first start the relay generates its receipt signing key and seals it to the platform in
-`$SELKEY_TEE_DATA_DIR/sealed_signing_key`. On SEV-SNP the sealing key (format `av-tee-seal-v3`,
+`$SELKEY_TEE_DATA_DIR`, in a file per runtime: `sealed_signing_key.sev-snp` for SEV-SNP and
+`sealed_signing_key` for the simulated runtime, so a simulated fallback never touches the
+SEV-SNP key. On SEV-SNP the sealing key (format `av-tee-seal-v3`,
 key policy `0x02`) is derived from the VCEK at VMPL 0 with the **guest policy**, the **launch
 measurement** and a **TCB floor** mixed in. The floor is the platform's committed TCB at
 sealing time and is recorded in the blob, so:
 
 - a guest launched with a different policy (for example with debugging or a migration agent
   allowed) or a different measurement cannot unseal the key;
-- a platform whose committed TCB is below the floor cannot unseal it (the relay exits with an
+- a platform whose committed TCB was rolled back below the committed TCB at sealing time (the
+  floor) cannot unseal it (the relay exits with an
   error naming the TCB floor; it does not generate a new key);
 - TCB upgrades above the floor keep the key.
 
 If the sealed key exists but this CVM rejects it (older seal format or key policy, different
 platform, launch or guest policy, or a damaged file), the relay by default moves the file
-aside as `sealed_signing_key.rejected-<unix time>` (it is never deleted), generates and seals a
+aside as `<file>.rejected-<unix time>` (it is never deleted), generates and seals a
 new key, and logs an error with the new `receipt_signing_pubkey_hex`. It does not restart in a
 loop. Set `SELKEY_SEAL_STRICT=1` to exit instead and leave the file in place. Device or
 firmware failures always stop startup and never trigger a new key.
@@ -71,11 +74,17 @@ firmware failures always stop startup and never trigger a new key.
 Keys sealed by earlier versions (`av-tee-seal-v2`, key policy `0x01`: measurement only) cannot
 be unsealed under the new policy. On the first start after upgrading:
 
-1. The relay moves the old blob aside and generates a new receipt signing key (or, with
-   `SELKEY_SEAL_STRICT=1`, exits; then move `sealed_signing_key` aside yourself and restart).
-2. The receipt signing key changes. Fetch the new key from `GET /tee/info`
-   (`receipt_signing_pubkey_hex`) and update every client and verifier that pins it (for example
-   `relay_verifying_key_hex` in contracts and `VerifyOptions::pinned_receipt_key`).
+1. The SEV-SNP runtime now uses `sealed_signing_key.sev-snp`, so it generates and seals a new
+   receipt signing key there and leaves the old `sealed_signing_key` untouched (keep or delete it
+   once no receipt signed with it needs checking).
+2. The receipt signing key changes. Don't take the new key from `GET /tee/info` alone: that
+   endpoint is unauthenticated. Take it from a receipt issued after the restart whose attestation
+   verifies with `is_valid()` (chain-verified quote, DEBUG off, allowlisted measurement, v3
+   transcript binding the key), checking the key named in `tee_attestation`, and compare it with
+   the key in the relay's startup log. Then update every client and verifier that pins it (for
+   example `relay_verifying_key_hex` in contracts and `VerifyOptions::pinned_receipt_key`).
+   While the measurement doesn't cover the relay code, this shows the key is held in a genuine
+   SNP VM, not which code holds it.
 3. Receipts signed with the old key stay verifiable with the old key.
 
 The simulated runtime's seal format (`av-tee-seal-v1`) is unchanged.
@@ -120,11 +129,13 @@ match the quote verifier's platform, and a simulated quote is reported as `Quote
 never as verified. Parse v3 receipts with `receipt_core::parse_receipt_v3_strict` before passing
 them to `TeeReceipt::V3`.
 
-For SEV-SNP receipts, set `VerifyOptions::snp`:
+For SEV-SNP receipts, set `VerifyOptions::snp` to
+`VerificationConfig::new(tcb_policy)`. Without it, a receipt that carries a VCEK is reported as
+`QuoteInvalid(TcbPolicyRequired)`; there is no default TCB policy.
 
-- `tcb_policy`: minimum boot loader, TEE, SNP and microcode versions. Take them from AMD's
-  current security bulletins for the product family you run on; the default only rejects an
-  all-zero TCB.
+- `tcb_policy`: `TcbPolicy::minimums(boot_loader, tee, snp, microcode)` with floors from AMD's
+  current security bulletins for the product family you run on. (`TcbPolicy::reject_all_zero()`
+  accepts any non-zero TCB and is not a floor.)
 - `report_policy`: expected VMPL (default 0), whether SMT is acceptable (default yes, as on GCP
   N2D), whether a migration agent is acceptable (default no), and whether CHIP_ID must match the
   VCEK (default yes).
@@ -132,6 +143,9 @@ For SEV-SNP receipts, set `VerifyOptions::snp`:
   `https://kdsintf.amd.com/vcek/v1/{Milan,Genoa}/crl`. Fetch it out of band, verify it is signed
   by the ARK, and pass the revoked serial numbers as `RevokedSerials`.
 - `verification_time`: the time the VCEK and ASK must be valid at (default: now).
+
+Only AMD Milan and Genoa are supported. Turin (different TCB layout and hwID length, no bundled
+roots) is rejected.
 
 ## Environment variables
 
@@ -142,7 +156,7 @@ For SEV-SNP receipts, set `VerifyOptions::snp`:
 | `SELKEY_SIGNING_KEY_HEX` | (auto) | Override signing key (dev only) |
 | `ANTHROPIC_API_KEY` | (none) | Anthropic API key for relay mode |
 | `SELKEY_MODEL_ID` | `claude-sonnet-4-5-20250929` | Model to use |
-| `ANTHROPIC_BASE_URL` | (default) | Custom API base URL. Bound into the transcript through `relay_config_hash` |
+| `ANTHROPIC_BASE_URL` | (default) | Custom API base URL. Bound into the transcript through `relay_config_hash` and published at `/tee/info`, so it must not contain user info, a query or a fragment (the relay refuses to start) |
 | `SELKEY_ENV` | (unset) | Environment label, bound into the transcript through `relay_config_hash` |
 | `SELKEY_MAX_COMPLETION_TOKENS` | `4096` | Max completion tokens |
 | `SELKEY_OPERATOR_ID` | `selkey-tee-relay-dev` | Operator identifier in receipts |
