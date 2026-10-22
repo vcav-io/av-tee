@@ -120,6 +120,14 @@ was used, because the assurance levels differ significantly:
 - **Measurement allowlist entries** state what they cover (`platform`). A `gcp-snp-ovmf` match
   supports only "genuine GCP SNP VM running Google-endorsed firmware; relay code not measured".
 
+## Contract checks
+
+`POST /sessions` rejects a contract the relay can't run as specified before any input is
+submitted: unsupported prompt template, model profile or model constraints, a relay key pin
+that isn't this relay's key, a non-strict output schema, or a schema whose entropy upper bound
+exceeds the contract's budget (with `Gate` or `Strict` enforcement). The entropy budget is
+per session only. The Selkey relay's cross-session ledger has no equivalent here.
+
 ## Simulated mode caveats
 
 `SimulatedCvm` provides no hardware isolation. It exercises the same code

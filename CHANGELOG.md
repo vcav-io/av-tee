@@ -4,6 +4,18 @@
 
 ### Changed
 
+- TEE lane parity with the Selkey relay:
+  - `POST /sessions` checks contract support before any input is submitted (prompt template,
+    relay key pin, model profile and constraints, output schema, entropy budget) and answers
+    `400` with an error message instead of accepting inputs and aborting at inference.
+  - Output schemas must be strict inline schemas (no schema registry in tee-relay); the entropy
+    upper bound is computed from the schema, ignoring self-declared bounds.
+  - The contract entropy budget is enforced per session (`Gate`/`Strict` reject, `Advisory`
+    logs).
+  - Failure receipts for schema-rejected output have status `rejected` and `signal_class`
+    `schema_validation_failed` (was `error` / `inference_error`); provider failures are
+    `provider_error`.
+
 - `tee-verifier` SEV-SNP report checks (applied when the receipt carries the VCEK):
   - TCB fields are read from the ABI layout (SNP at byte 6, microcode at byte 7 of TCB_VERSION;
     they were read from reserved bytes 4 and 5). `TcbPolicy` minimums now apply to the right

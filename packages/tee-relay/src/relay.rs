@@ -252,9 +252,13 @@ pub fn hash_json_v3(value: &serde_json::Value) -> Result<String, RelayError> {
         .map_err(|e| RelayError::Internal(format!("canonicalization: {e}")))
 }
 
-// Returns the canonical inline schema hash so validation and receipt binding
-// share the same preflight result.
-fn validate_contract_support(
+/// Check that tee-relay supports a contract: two participants, the inline
+/// prompt template, the relay key pin, no model profile or constraints, and
+/// an accepted output schema within the contract's entropy budget.
+///
+/// Runs at `POST /sessions`, before any input is submitted, and again before
+/// inference. Returns the schema hash for receipt binding.
+pub fn validate_contract_support(
     contract: &vault_family_types::Contract,
     state: &AppState,
 ) -> Result<String, RelayError> {
@@ -291,16 +295,8 @@ fn validate_contract_support(
         ));
     }
 
-    let inline_schema_hash = hash_json_v3(&contract.output_schema)?;
-    if let Some(expected_schema_hash) = contract.output_schema_hash.as_deref()
-        && expected_schema_hash != inline_schema_hash
-    {
-        return Err(RelayError::ContractValidation(
-            "output_schema_hash does not match inline output_schema".to_string(),
-        ));
-    }
-
-    Ok(inline_schema_hash)
+    let accepted = crate::schema_acceptance::accept_output_schema(contract)?;
+    Ok(accepted.hash)
 }
 
 /// Core TEE relay logic: validate → assemble → call provider → validate output → build receipt.
@@ -573,6 +569,19 @@ async fn build_tee_receipt_v3(
         .map_err(|e| RelayError::ReceiptSigning(format!("v3 signing failed: {e}")))
 }
 
+/// Receipt `(status, signal_class)` for a session that failed with `error`.
+///
+/// Output that the provider produced but the schema rejected is `rejected`,
+/// as in the Selkey relay; other failures are `error`.
+pub fn failure_status(error: &RelayError) -> (SessionStatus, &'static str) {
+    match error {
+        RelayError::OutputValidation(_) => (SessionStatus::Rejected, "schema_validation_failed"),
+        RelayError::Provider(_) => (SessionStatus::Error, "provider_error"),
+        RelayError::ContractValidation(_) => (SessionStatus::Error, "contract_validation_failed"),
+        _ => (SessionStatus::Error, "inference_error"),
+    }
+}
+
 /// Build a v3 failure receipt for an aborted TEE session.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_failure_receipt_v3(
@@ -582,6 +591,7 @@ pub async fn build_failure_receipt_v3(
     input_commitments: Vec<InputCommitmentV3>,
     initiator_submission_hash: Option<&str>,
     responder_submission_hash: Option<&str>,
+    status: SessionStatus,
     signal_class: &str,
     state: &AppState,
 ) -> Result<ReceiptV3, RelayError> {
@@ -661,7 +671,7 @@ pub async fn build_failure_receipt_v3(
             provider_latency_ms: None,
             token_usage: None,
             relay_software_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            status: Some(SessionStatus::Error),
+            status: Some(status),
             signal_class: Some(signal_class.to_string()),
             execution_lane: Some(ExecutionLaneV2::Tee),
             channel_capacity_bits_upper_bound: None,

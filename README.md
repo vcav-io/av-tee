@@ -73,6 +73,17 @@ it as `receipt`. In the TEE lane:
   `contract.participants` order. A participant checks its own entry with its nonce and context.
 - `contract_hash` is contract hash v2 (`SHA256_JCS_V2`), computed from the contract JSON as
   received at `POST /sessions`. Contracts with unknown members are rejected.
+- `POST /sessions` also checks, before any input is submitted, that the relay can run the
+  contract: the inline prompt template, `relay_verifying_key_hex` (if set) equal to the relay's
+  key, no model profile or model constraints, and the output schema. tee-relay has no schema
+  registry, so it accepts only strict inline schemas (the Selkey relay's inline rules: closed
+  objects, every property required, bounded strings, arrays and integers) and computes their
+  entropy upper bound itself. With `entropy_budget_bits` set and enforcement `Gate` (default) or
+  `Strict`, a schema whose bound exceeds the budget is rejected; `Advisory` only logs. The budget
+  applies per session; there is no cross-session ledger. A rejected contract gets `400` and no
+  session.
+- Output that the schema rejects gets a failure receipt with status `rejected` and
+  `signal_class` `schema_validation_failed`; provider failures get `error` / `provider_error`.
 - `initiator_submission_hash` and `responder_submission_hash` are SHA-256 hashes of the
   ciphertexts, and `tee_attestation.receipt_signing_pubkey_hex` is the receipt signing key.
 - Receipts carry no `claims.budget_usage`. The field is optional in v3, and the TEE lane doesn't
