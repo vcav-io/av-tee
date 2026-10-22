@@ -60,16 +60,9 @@ pub async fn create_session(
     let session_id = session_uuid.to_string();
     let session_id_bytes: [u8; 16] = *session_uuid.as_bytes();
 
-    // Compute contract hash for binding
-    let contract_hash_hex = {
-        let canonical = receipt_core::canonicalize_serializable(&req.contract).map_err(|e| {
-            tracing::error!("contract canonicalization failed: {e}"); // SAFETY: no plaintext
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        hex::encode(hasher.finalize())
-    };
+    // Validate the contract as received and compute its contract hash v2
+    let accepted = relay::accept_contract(&req.contract).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let contract_hash_hex = accepted.contract_hash;
 
     let contract_hash_bytes = hex::decode(&contract_hash_hex).map_err(|e| {
         tracing::error!("contract hash hex decode failed: {e}"); // SAFETY: no plaintext
@@ -84,7 +77,7 @@ pub async fn create_session(
         session_id_bytes,
         contract_hash_bytes,
         contract_hash_hex.clone(),
-        req.contract,
+        accepted.contract,
         secret,
         pubkey,
         initiator_submit_token.clone(),
@@ -188,6 +181,11 @@ pub async fn submit_input(
                 &expected_aad,
             )
             .map_err(|_| ())?;
+
+            // The plaintext must carry a well-formed commitment_nonce and a
+            // committable context. The parsed value is dropped here (its
+            // nonce is zeroed); the plaintext is parsed again for inference.
+            relay::parse_decrypted_input(plaintext.as_slice()).map_err(|_| ())?;
 
             session.mark_submitted(role);
             match role {
@@ -299,15 +297,33 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
         return;
     };
 
-    // Compute schema hash for failure receipt
-    let schema_hash = match receipt_core::canonicalize_serializable(&contract.output_schema) {
-        Ok(c) => {
-            let mut h = Sha256::new();
-            h.update(c.as_bytes());
-            hex::encode(h.finalize())
-        }
+    // Parse the decrypted inputs (validated at submission) and compute their
+    // v3 input commitments, which success and failure receipts both carry.
+    let parsed = relay::parse_decrypted_input(initiator_input.as_slice()).and_then(|a| {
+        let b = relay::parse_decrypted_input(responder_input.as_slice())?;
+        let commitments = relay::compute_input_commitments(&contract, &a, &b)?;
+        Ok((a, b, commitments))
+    });
+    drop(initiator_input);
+    drop(responder_input);
+    let (input_a, input_b, input_commitments) = match parsed {
+        Ok(p) => p,
         Err(e) => {
-            tracing::error!(session_id = %session_id, "schema canonicalization failed: {e}"); // SAFETY: no plaintext
+            tracing::error!(session_id = %session_id, error_kind = %e.kind(), "input commitment failed"); // SAFETY: no plaintext
+            let _ = state.sessions.with_session(&session_id, |session| {
+                session.state = SessionState::Aborted;
+                session.abort_signal = Some("input_commitment_failed".to_string());
+                session.clear_inputs();
+            });
+            return;
+        }
+    };
+
+    // Compute schema hash for failure receipt
+    let schema_hash = match relay::hash_json_v3(&contract.output_schema) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(session_id = %session_id, error_kind = %e.kind(), "schema canonicalization failed"); // SAFETY: no plaintext
             let _ = state.sessions.with_session(&session_id, |session| {
                 session.state = SessionState::Aborted;
                 session.abort_signal = Some("schema_canonicalization_failed".to_string());
@@ -320,21 +336,26 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
     let result = relay::relay_core(
         &session_id,
         &contract,
-        &initiator_input,
-        &responder_input,
+        &input_a,
+        &input_b,
+        input_commitments.clone(),
         &init_ct_hash,
         &resp_ct_hash,
         &contract_hash_hex,
         &state.app,
     )
     .await;
+    // Drop the parsed inputs (zeroing their commitment nonces) before
+    // building any failure receipt.
+    drop(input_a);
+    drop(input_b);
 
     match result {
         Ok(relay_result) => {
             let _ = state.sessions.with_session(&session_id, |session| {
                 session.state = SessionState::Completed;
                 session.output = Some(relay_result.output);
-                session.receipt_v2 = Some(relay_result.receipt_v2);
+                session.receipt = Some(relay_result.receipt);
                 session.clear_inputs();
             });
         }
@@ -342,10 +363,11 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
             // Log only the error variant, not the full message (may contain plaintext fragments)
             tracing::warn!(session_id = %session_id, error_kind = %e.kind(), "inference failed"); // SAFETY: no plaintext
             // Build failure receipt
-            let failure_receipt = relay::build_failure_receipt_v2(
+            let failure_receipt = relay::build_failure_receipt_v3(
                 &session_id,
                 &contract_hash_hex,
                 &schema_hash,
+                input_commitments,
                 Some(&init_ct_hash),
                 Some(&resp_ct_hash),
                 "inference_error",
@@ -356,10 +378,10 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
             let _ = state.sessions.with_session(&session_id, |session| {
                 session.state = SessionState::Aborted;
                 session.abort_signal = Some(e.kind().to_string());
-                session.receipt_v2 = match failure_receipt {
+                session.receipt = match failure_receipt {
                     Ok(r) => Some(r),
                     Err(re) => {
-                        tracing::error!(session_id = %session_id, "failed to build failure receipt: {re}"); // SAFETY: no plaintext
+                        tracing::error!(session_id = %session_id, error_kind = %re.kind(), "failed to build failure receipt"); // SAFETY: no plaintext
                         None
                     }
                 };
@@ -407,7 +429,7 @@ pub async fn session_output(
             Ok(Json(SessionOutputResponse {
                 state: session.state,
                 output: session.output.clone(),
-                receipt_v2: session.receipt_v2.clone(),
+                receipt: session.receipt.clone(),
             }))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

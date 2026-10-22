@@ -37,7 +37,8 @@ pub struct Session {
     pub responder_ciphertext_hash: Option<String>,
     pub state: SessionState,
     pub output: Option<serde_json::Value>,
-    pub receipt_v2: Option<receipt_core::ReceiptV2>,
+    /// Signed v3 receipt (success or failure).
+    pub receipt: Option<receipt_core::ReceiptV3>,
     pub abort_signal: Option<String>,
     pub created_at: std::time::Instant,
     pub initiator_submit_token: String,
@@ -73,7 +74,7 @@ impl Session {
             responder_ciphertext_hash: None,
             state: SessionState::Created,
             output: None,
-            receipt_v2: None,
+            receipt: None,
             abort_signal: None,
             created_at: std::time::Instant::now(),
             initiator_submit_token,

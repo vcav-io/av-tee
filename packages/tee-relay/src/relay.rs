@@ -1,8 +1,8 @@
 use chrono::Utc;
 use receipt_core::{
-    AssuranceLevel, CANONICALIZATION_V2, Claims, Commitments, ExecutionLaneV2, HashAlgorithm,
-    InputCommitment, Operator, ReceiptV2, SCHEMA_VERSION_V2, SessionStatus, TeeAttestation,
-    UnsignedReceiptV2,
+    AssuranceLevel, CANONICALIZATION_V3, ClaimsV3, CommitmentsV3, ContractHashAlg, ExecutionLaneV2,
+    InputCommitmentScheme, InputCommitmentV3, OperatorV3, ReceiptV3, SCHEMA_VERSION_V3,
+    SessionStatus, TeeAttestation, UnsignedReceiptV3,
 };
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -40,11 +40,56 @@ impl std::fmt::Debug for AppState {
     }
 }
 
+/// Client-generated input commitment nonce (32 bytes).
+///
+/// Carried inside the encrypted submission plaintext as `commitment_nonce`:
+/// exactly 64 lowercase hex characters. The relay uses it only to compute the
+/// participant's input commitment; it is never written to receipts, logs or
+/// responses, and its bytes are zeroed when the input is dropped.
+pub struct CommitmentNonce([u8; receipt_core::commitment_v3::COMMITMENT_NONCE_LEN]);
+
+impl CommitmentNonce {
+    /// Parse the wire form (64 lowercase hex characters).
+    pub fn parse(hex_nonce: &str) -> Result<Self, receipt_core::CommitmentError> {
+        receipt_core::parse_commitment_nonce(hex_nonce).map(Self)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; receipt_core::commitment_v3::COMMITMENT_NONCE_LEN] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CommitmentNonce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CommitmentNonce([REDACTED])")
+    }
+}
+
+impl Drop for CommitmentNonce {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CommitmentNonce {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let hex_nonce = Zeroizing::new(String::deserialize(deserializer)?);
+        // The error message never includes the value.
+        CommitmentNonce::parse(&hex_nonce).map_err(|_| {
+            serde::de::Error::custom(
+                "commitment_nonce must be 64 lowercase hex characters (32 bytes)",
+            )
+        })
+    }
+}
+
 /// Input from a single participant (decrypted inside the CVM).
 #[derive(serde::Deserialize)]
 pub struct DecryptedInput {
     pub role: String,
     pub context: serde_json::Value,
+    /// Required. Salts this participant's input commitment in the receipt.
+    pub commitment_nonce: CommitmentNonce,
 }
 
 // Manual Debug to prevent plaintext leaking via panic/log.
@@ -53,14 +98,92 @@ impl std::fmt::Debug for DecryptedInput {
         f.debug_struct("DecryptedInput")
             .field("role", &self.role)
             .field("context", &"[REDACTED]")
+            .field("commitment_nonce", &"[REDACTED]")
             .finish()
     }
+}
+
+/// Parse and validate a decrypted submission plaintext.
+///
+/// The plaintext must carry `role`, `context` and a well-formed
+/// `commitment_nonce`, and the context must be committable under the receipt
+/// v3 canonicalisation profile (numbers within +/-(2^53-1)). Errors never
+/// include plaintext.
+pub fn parse_decrypted_input(plaintext: &[u8]) -> Result<DecryptedInput, RelayError> {
+    let input: DecryptedInput = serde_json::from_slice(plaintext)
+        .map_err(|_| RelayError::ContractValidation("invalid submission".to_string()))?;
+    receipt_core::canonicalize_v3(&input.context)
+        .map_err(|_| RelayError::ContractValidation("invalid input context".to_string()))?;
+    Ok(input)
+}
+
+/// Compute the v3 input commitments, in `contract.participants` order.
+pub fn compute_input_commitments(
+    contract: &vault_family_types::Contract,
+    input_a: &DecryptedInput,
+    input_b: &DecryptedInput,
+) -> Result<Vec<InputCommitmentV3>, RelayError> {
+    if contract.participants.len() != 2 {
+        return Err(RelayError::ContractValidation(
+            "contract must have exactly 2 participants".to_string(),
+        ));
+    }
+    [
+        (&contract.participants[0], input_a),
+        (&contract.participants[1], input_b),
+    ]
+    .iter()
+    .map(|(participant_id, input)| {
+        let input_commitment = receipt_core::compute_input_commitment_v3(
+            input.commitment_nonce.as_bytes(),
+            &input.context,
+        )
+        .map_err(|_| RelayError::ContractValidation("input commitment failed".to_string()))?;
+        Ok(InputCommitmentV3 {
+            participant_id: (*participant_id).clone(),
+            input_commitment,
+            scheme: InputCommitmentScheme::Sha256N32JcsV3,
+        })
+    })
+    .collect()
+}
+
+/// A contract accepted from a request, with its contract hash v2.
+#[derive(Debug, Clone)]
+pub struct AcceptedContract {
+    /// Typed contract used by the relay.
+    pub contract: vault_family_types::Contract,
+    /// Contract hash v2 (`SHA256_JCS_V2`) of the contract as received.
+    pub contract_hash: String,
+}
+
+/// Validate a contract as received and compute its contract hash v2.
+///
+/// The hash is computed from the received JSON (normalised per contract hash
+/// v2), never from a re-serialised typed contract. Unknown members, including
+/// a `contract_hash` member, are rejected.
+pub fn accept_contract(contract_json: &serde_json::Value) -> Result<AcceptedContract, RelayError> {
+    let normalized = receipt_core::normalize_contract_v2(contract_json)
+        .map_err(|e| RelayError::ContractValidation(format!("contract: {e}")))?;
+    let contract_hash = receipt_core::jcs::hash_v3(&normalized)
+        .map_err(|e| RelayError::ContractValidation(format!("contract: {e}")))?;
+    let contract: vault_family_types::Contract = serde_json::from_value(normalized)
+        .map_err(|e| RelayError::ContractValidation(format!("contract: {e}")))?;
+    if contract.participants.len() != 2 {
+        return Err(RelayError::ContractValidation(
+            "contract must have exactly 2 participants".to_string(),
+        ));
+    }
+    Ok(AcceptedContract {
+        contract,
+        contract_hash,
+    })
 }
 
 /// Result of relay_core execution.
 pub struct RelayResult {
     pub output: serde_json::Value,
-    pub receipt_v2: ReceiptV2,
+    pub receipt: ReceiptV3,
 }
 
 /// Validate JSON output against a JSON Schema.
@@ -81,13 +204,11 @@ fn validate_output_schema(
     Ok(())
 }
 
-/// Compute SHA-256 of canonical JSON for a serializable value.
-fn canonical_sha256(value: &impl serde::Serialize) -> Result<String, RelayError> {
-    let canonical = receipt_core::canonicalize_serializable(value)
-        .map_err(|e| RelayError::Internal(format!("canonicalization: {e}")))?;
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    Ok(hex::encode(hasher.finalize()))
+/// `hex(SHA-256(JCS(value)))` with the receipt v3 canonicalisation profile
+/// (RFC 8785, numbers limited to +/-(2^53-1)).
+pub fn hash_json_v3(value: &serde_json::Value) -> Result<String, RelayError> {
+    receipt_core::jcs::hash_v3(value)
+        .map_err(|e| RelayError::Internal(format!("canonicalization: {e}")))
 }
 
 // Returns the canonical inline schema hash so validation and receipt binding
@@ -129,7 +250,7 @@ fn validate_contract_support(
         ));
     }
 
-    let inline_schema_hash = canonical_sha256(&contract.output_schema)?;
+    let inline_schema_hash = hash_json_v3(&contract.output_schema)?;
     if let Some(expected_schema_hash) = contract.output_schema_hash.as_deref()
         && expected_schema_hash != inline_schema_hash
     {
@@ -143,15 +264,18 @@ fn validate_contract_support(
 
 /// Core TEE relay logic: validate → assemble → call provider → validate output → build receipt.
 ///
-/// This runs entirely inside the CVM. Decrypted inputs arrive as `Zeroizing<Vec<u8>>`
-/// and are parsed here. The parsed `DecryptedInput` values are dropped when this
-/// function returns (serde_json::Value is not zeroized — see CLAUDE.md known limitations).
+/// This runs entirely inside the CVM. Inputs were decrypted and validated at
+/// submission; `input_commitments` are their v3 commitments, computed by the
+/// caller so that a failure receipt can carry them too. The caller drops the
+/// inputs (and zeroes their commitment nonces) when this returns
+/// (serde_json::Value is not zeroized — see CLAUDE.md known limitations).
 #[allow(clippy::too_many_arguments)]
 pub async fn relay_core(
     session_id: &str,
     contract: &vault_family_types::Contract,
-    initiator_plaintext: &Zeroizing<Vec<u8>>,
-    responder_plaintext: &Zeroizing<Vec<u8>>,
+    input_a: &DecryptedInput,
+    input_b: &DecryptedInput,
+    input_commitments: Vec<InputCommitmentV3>,
     initiator_ciphertext_hash: &str,
     responder_ciphertext_hash: &str,
     contract_hash_hex: &str,
@@ -160,11 +284,7 @@ pub async fn relay_core(
     // 1. Validate contract
     let schema_hash = validate_contract_support(contract, state)?;
 
-    // 2. Parse decrypted inputs
-    let input_a: DecryptedInput = serde_json::from_slice(initiator_plaintext.as_slice())
-        .map_err(|_| RelayError::ContractValidation("invalid initiator input".to_string()))?;
-    let input_b: DecryptedInput = serde_json::from_slice(responder_plaintext.as_slice())
-        .map_err(|_| RelayError::ContractValidation("invalid responder input".to_string()))?;
+    // 2. Check plaintext role labels
     if input_a.role != contract.participants[0] {
         return Err(RelayError::ContractValidation(
             "initiator role label does not match contract participant".to_string(),
@@ -175,25 +295,6 @@ pub async fn relay_core(
             "responder role label does not match contract participant".to_string(),
         ));
     }
-
-    // 3. Compute input commitments (hash of plaintext context, per participant)
-    let input_commitments: Vec<InputCommitment> = {
-        let inputs = [
-            (&contract.participants[0], &input_a),
-            (&contract.participants[1], &input_b),
-        ];
-        let mut commitments = Vec::with_capacity(2);
-        for (participant_id, input) in &inputs {
-            let hash = canonical_sha256(&input.context)?;
-            commitments.push(InputCommitment {
-                participant_id: (*participant_id).clone(),
-                input_hash: hash,
-                hash_alg: HashAlgorithm::Sha256,
-                canonicalization: "CANONICAL_JSON_V1".to_string(),
-            });
-        }
-        commitments
-    };
 
     // 4. Assemble prompt
     let system = format!(
@@ -221,13 +322,13 @@ pub async fn relay_core(
     );
 
     // 5. Compute assembled prompt hash
-    let assembled_prompt_hash = {
-        let prompt_json = serde_json::json!({
-            "system": &system,
-            "user_message": &user_message,
-        });
-        canonical_sha256(&prompt_json)?
-    };
+    // TODO: `assembled_prompt_hash` is being removed from receipt v3 in
+    // vault-family-core. It is still a required field at the pinned revision;
+    // stop computing and emitting it when the pin moves.
+    let assembled_prompt_hash = hash_json_v3(&serde_json::json!({
+        "system": &system,
+        "user_message": &user_message,
+    }))?;
 
     // 6. Compute prompt template hash (inline prompt program for now)
     let prompt_template_hash = { INLINE_PROMPT_TEMPLATE_HASH.to_string() };
@@ -268,8 +369,8 @@ pub async fn relay_core(
     validate_output_schema(&output, &contract.output_schema)?;
 
     // 10. Build TEE receipt
-    let output_hash = canonical_sha256(&output)?;
-    let receipt_v2 = build_tee_receipt_v2(
+    let output_hash = hash_json_v3(&output)?;
+    let receipt = build_tee_receipt_v3(
         session_id,
         contract_hash_hex,
         &schema_hash,
@@ -287,13 +388,40 @@ pub async fn relay_core(
     )
     .await?;
 
-    Ok(RelayResult { output, receipt_v2 })
+    Ok(RelayResult { output, receipt })
 }
 
 #[cfg(test)]
 mod tests {
     use super::INLINE_PROMPT_TEMPLATE_HASH;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn decrypted_input_debug_redacts_commitment_nonce() {
+        let nonce = "3c".repeat(32);
+        let plaintext = serde_json::json!({
+            "role": "alice",
+            "context": {"secret": "value"},
+            "commitment_nonce": nonce,
+        });
+        let input = super::parse_decrypted_input(&serde_json::to_vec(&plaintext).unwrap()).unwrap();
+        let debug = format!("{input:?}");
+        assert!(!debug.contains(&nonce));
+        assert!(!debug.contains("value"));
+    }
+
+    #[test]
+    fn parse_decrypted_input_errors_do_not_echo_the_nonce() {
+        let nonce = "3C".repeat(32);
+        let plaintext = serde_json::json!({
+            "role": "alice",
+            "context": {},
+            "commitment_nonce": nonce,
+        });
+        let err = super::parse_decrypted_input(&serde_json::to_vec(&plaintext).unwrap())
+            .expect_err("uppercase nonce is rejected");
+        assert!(!err.to_string().contains(&nonce));
+    }
 
     #[test]
     fn inline_prompt_template_hash_constant_matches_v1_program_id() {
@@ -303,15 +431,26 @@ mod tests {
     }
 }
 
-/// Build and sign a TEE-mode v2 receipt with attestation binding.
+/// Receipt operator block: `operator_key_fingerprint = SHA-256(signing pubkey)`.
+fn operator_v3(state: &AppState) -> OperatorV3 {
+    OperatorV3 {
+        operator_id: state.operator_id.clone(),
+        operator_key_fingerprint: receipt_core::receipt_v3::operator_key_fingerprint(
+            &state.signing_key.verifying_key(),
+        ),
+        operator_key_discovery: None,
+    }
+}
+
+/// Build and sign a TEE-mode v3 receipt with attestation binding.
 #[allow(clippy::too_many_arguments)]
-async fn build_tee_receipt_v2(
+async fn build_tee_receipt_v3(
     session_id: &str,
     contract_hash: &str,
     schema_hash: &str,
     output: &serde_json::Value,
     output_hash: &str,
-    input_commitments: Vec<InputCommitment>,
+    input_commitments: Vec<InputCommitmentV3>,
     assembled_prompt_hash: String,
     prompt_template_hash: &str,
     initiator_submission_hash: &str,
@@ -320,7 +459,7 @@ async fn build_tee_receipt_v2(
     state: &AppState,
     inference_start: chrono::DateTime<chrono::Utc>,
     inference_end: chrono::DateTime<chrono::Utc>,
-) -> Result<ReceiptV2, RelayError> {
+) -> Result<ReceiptV3, RelayError> {
     // Derive receipt signing pubkey from AppState (not from CVM identity)
     let receipt_signing_pubkey_hex =
         receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
@@ -354,15 +493,6 @@ async fn build_tee_receipt_v2(
         hex::encode(h.finalize())
     };
 
-    // Compute operator key fingerprint
-    let operator_key_fingerprint = {
-        let key_bytes = hex::decode(&receipt_signing_pubkey_hex)
-            .map_err(|e| RelayError::Internal(format!("own verifying key is invalid hex: {e}")))?;
-        let mut hasher = Sha256::new();
-        hasher.update(&key_bytes);
-        hex::encode(hasher.finalize())
-    };
-
     let provider_latency_ms: Option<u64> = match (inference_end - inference_start)
         .num_milliseconds()
         .try_into()
@@ -381,20 +511,17 @@ async fn build_tee_receipt_v2(
         AssuranceLevel::SelfAsserted
     };
 
-    let unsigned = UnsignedReceiptV2 {
-        receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
-        receipt_canonicalization: CANONICALIZATION_V2.to_string(),
+    let unsigned = UnsignedReceiptV3 {
+        receipt_schema_version: SCHEMA_VERSION_V3.to_string(),
+        receipt_canonicalization: CANONICALIZATION_V3.to_string(),
         receipt_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
-        issued_at: Utc::now(),
+        issued_at: receipt_core::format_issued_at_v3(Utc::now()),
         assurance_level,
-        operator: Operator {
-            operator_id: state.operator_id.clone(),
-            operator_key_fingerprint,
-            operator_key_discovery: None,
-        },
-        commitments: Commitments {
+        operator: operator_v3(state),
+        commitments: CommitmentsV3 {
             contract_hash: contract_hash.to_string(),
+            contract_hash_alg: ContractHashAlg::Sha256JcsV2,
             schema_hash: schema_hash.to_string(),
             output_hash: output_hash.to_string(),
             input_commitments,
@@ -412,7 +539,7 @@ async fn build_tee_receipt_v2(
             initiator_submission_hash: Some(initiator_submission_hash.to_string()),
             responder_submission_hash: Some(responder_submission_hash.to_string()),
         },
-        claims: Claims {
+        claims: ClaimsV3 {
             model_identity_asserted: Some(model_identity_asserted),
             model_identity_attested: None,
             model_profile_hash_asserted: None,
@@ -429,6 +556,8 @@ async fn build_tee_receipt_v2(
             channel_capacity_measurement_version: None,
             entropy_budget_bits: None,
             schema_entropy_ceiling_bits: None,
+            // The TEE lane does not measure channel capacity, so it makes no
+            // budget usage claim.
             budget_usage: None,
         },
         provider_attestation: None,
@@ -449,21 +578,22 @@ async fn build_tee_receipt_v2(
         }),
     };
 
-    receipt_core::sign_and_assemble_receipt_v2(unsigned, &state.signing_key)
-        .map_err(|e| RelayError::ReceiptSigning(format!("v2 signing failed: {e}")))
+    receipt_core::sign_and_assemble_receipt_v3(unsigned, &state.signing_key)
+        .map_err(|e| RelayError::ReceiptSigning(format!("v3 signing failed: {e}")))
 }
 
-/// Build a failure receipt for an aborted TEE session.
+/// Build a v3 failure receipt for an aborted TEE session.
 #[allow(clippy::too_many_arguments)]
-pub async fn build_failure_receipt_v2(
+pub async fn build_failure_receipt_v3(
     session_id: &str,
     contract_hash: &str,
     schema_hash: &str,
+    input_commitments: Vec<InputCommitmentV3>,
     initiator_submission_hash: Option<&str>,
     responder_submission_hash: Option<&str>,
     signal_class: &str,
     state: &AppState,
-) -> Result<ReceiptV2, RelayError> {
+) -> Result<ReceiptV3, RelayError> {
     // Derive receipt signing pubkey from AppState (not from CVM identity)
     let receipt_signing_pubkey_hex =
         receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
@@ -497,38 +627,26 @@ pub async fn build_failure_receipt_v2(
         hex::encode(h.finalize())
     };
 
-    let verifying_key_hex = receipt_core::public_key_to_hex(&state.signing_key.verifying_key());
-    let operator_key_fingerprint = {
-        let key_bytes = hex::decode(&verifying_key_hex)
-            .map_err(|e| RelayError::Internal(format!("own verifying key is invalid hex: {e}")))?;
-        let mut hasher = Sha256::new();
-        hasher.update(&key_bytes);
-        hex::encode(hasher.finalize())
-    };
-
     let assurance_level = if state.cvm.is_real_tee() {
         AssuranceLevel::TeeAttested
     } else {
         AssuranceLevel::SelfAsserted
     };
 
-    let unsigned = UnsignedReceiptV2 {
-        receipt_schema_version: SCHEMA_VERSION_V2.to_string(),
-        receipt_canonicalization: CANONICALIZATION_V2.to_string(),
+    let unsigned = UnsignedReceiptV3 {
+        receipt_schema_version: SCHEMA_VERSION_V3.to_string(),
+        receipt_canonicalization: CANONICALIZATION_V3.to_string(),
         receipt_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
-        issued_at: Utc::now(),
+        issued_at: receipt_core::format_issued_at_v3(Utc::now()),
         assurance_level,
-        operator: Operator {
-            operator_id: state.operator_id.clone(),
-            operator_key_fingerprint,
-            operator_key_discovery: None,
-        },
-        commitments: Commitments {
+        operator: operator_v3(state),
+        commitments: CommitmentsV3 {
             contract_hash: contract_hash.to_string(),
+            contract_hash_alg: ContractHashAlg::Sha256JcsV2,
             schema_hash: schema_hash.to_string(),
             output_hash: empty_hash,
-            input_commitments: vec![],
+            input_commitments,
             assembled_prompt_hash: hex::encode(Sha256::digest(b"")),
             prompt_assembly_version: "1.0.0".to_string(),
             output: None,
@@ -542,7 +660,7 @@ pub async fn build_failure_receipt_v2(
             initiator_submission_hash: initiator_submission_hash.map(str::to_string),
             responder_submission_hash: responder_submission_hash.map(str::to_string),
         },
-        claims: Claims {
+        claims: ClaimsV3 {
             model_identity_asserted: None,
             model_identity_attested: None,
             model_profile_hash_asserted: None,
@@ -559,6 +677,8 @@ pub async fn build_failure_receipt_v2(
             channel_capacity_measurement_version: None,
             entropy_budget_bits: None,
             schema_entropy_ceiling_bits: None,
+            // The TEE lane does not measure channel capacity, so it makes no
+            // budget usage claim.
             budget_usage: None,
         },
         provider_attestation: None,
@@ -579,6 +699,6 @@ pub async fn build_failure_receipt_v2(
         }),
     };
 
-    receipt_core::sign_and_assemble_receipt_v2(unsigned, &state.signing_key)
-        .map_err(|e| RelayError::ReceiptSigning(format!("v2 failure receipt signing failed: {e}")))
+    receipt_core::sign_and_assemble_receipt_v3(unsigned, &state.signing_key)
+        .map_err(|e| RelayError::ReceiptSigning(format!("v3 failure receipt signing failed: {e}")))
 }
