@@ -4,6 +4,18 @@
 
 ### Changed
 
+- `tee-verifier` SEV-SNP report checks (applied when the receipt carries the VCEK):
+  - TCB fields are read from the ABI layout (SNP at byte 6, microcode at byte 7 of TCB_VERSION;
+    they were read from reserved bytes 4 and 5). `TcbPolicy` minimums now apply to the right
+    components, and REPORTED_TCB must equal the TCB in the VCEK's SPL extensions.
+  - KEY_INFO is decoded per the ABI: SIGNING_KEY (bits 4:2) must be VCEK and MASK_CHIP_KEY must
+    be clear. Bit 0 (AUTHOR_KEY_EN) was previously treated as the signing key flag.
+  - New `ReportPolicy`: VMPL (default 0), MIGRATE_MA (rejected by default), SMT (accepted by
+    default; configurable), CHIP_ID present and equal to the VCEK hwID (default on).
+  - VCEK and ASK validity windows (`VerificationConfig::verification_time`) and an optional
+    `RevocationCheck` hook (`RevokedSerials`).
+  - Report versions 2 to 5 are accepted (the checked fields have the same offsets).
+
 - TEE runtime hardening:
   - The relay no longer falls back to the simulated runtime silently. A build without `snp`
     starts only with `SELKEY_ALLOW_SIMULATED=1`; an `snp` build exits if SEV-SNP initialisation

@@ -862,7 +862,7 @@ mod snp_sig_tests {
     const SIG_S_OFFSET: usize = 744;
     const SIG_COMPONENT_LEN: usize = 72;
     const POLICY_OFFSET: usize = 8;
-    const FLAGS_OFFSET: usize = 72;
+    const KEY_INFO_OFFSET: usize = 72;
     const SIGNED_REGION_END: usize = 672;
 
     fn be_to_le_padded(be_bytes: &[u8], pad_len: usize) -> Vec<u8> {
@@ -885,12 +885,9 @@ mod snp_sig_tests {
         // Signature algo (offset 52, inside signed region)
         report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
 
-        // Flags (offset 72): bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK)
-        let mut flags: u32 = 0;
-        if vlek {
-            flags |= 1;
-        }
-        report[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+        // KEY_INFO (offset 72): SIGNING_KEY in bits 4:2 (0=VCEK, 1=VLEK)
+        let key_info: u32 = if vlek { 1 << 2 } else { 0 };
+        report[KEY_INFO_OFFSET..KEY_INFO_OFFSET + 4].copy_from_slice(&key_info.to_le_bytes());
 
         report[80..144].copy_from_slice(&[0xAA; 64]);
         report[144..192].copy_from_slice(&[0xBB; 48]);

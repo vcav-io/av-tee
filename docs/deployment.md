@@ -120,6 +120,19 @@ match the quote verifier's platform, and a simulated quote is reported as `Quote
 never as verified. Parse v3 receipts with `receipt_core::parse_receipt_v3_strict` before passing
 them to `TeeReceipt::V3`.
 
+For SEV-SNP receipts, set `VerifyOptions::snp`:
+
+- `tcb_policy`: minimum boot loader, TEE, SNP and microcode versions. Take them from AMD's
+  current security bulletins for the product family you run on; the default only rejects an
+  all-zero TCB.
+- `report_policy`: expected VMPL (default 0), whether SMT is acceptable (default yes, as on GCP
+  N2D), whether a migration agent is acceptable (default no), and whether CHIP_ID must match the
+  VCEK (default yes).
+- `revocation`: optional. AMD publishes a CRL per product family at
+  `https://kdsintf.amd.com/vcek/v1/{Milan,Genoa}/crl`. Fetch it out of band, verify it is signed
+  by the ARK, and pass the revoked serial numbers as `RevokedSerials`.
+- `verification_time`: the time the VCEK and ASK must be valid at (default: now).
+
 ## Environment variables
 
 | Variable | Default | Description |

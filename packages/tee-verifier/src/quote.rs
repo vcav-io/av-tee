@@ -133,15 +133,13 @@ impl QuoteVerifier for SimulatedQuoteVerifier {
 // SevSnpQuoteVerifier
 // ---------------------------------------------------------------------------
 
-/// SEV-SNP attestation report verifier.
+/// SEV-SNP attestation report verifier (field extraction).
 ///
-/// Currently supports field extraction (parse-only). Cryptographic chain
-/// verification (VCEK -> ASK -> ARK) is not yet implemented.
-///
-/// TODO(#14): VCEK signature verification
-/// TODO(#14): TCB version checks
-/// TODO(#14): Report signer identity allowlist
-/// TODO(#14): Product/family/stepping checks
+/// Extracts REPORT_DATA and MEASUREMENT from a version 2 to 5 report and
+/// returns `VerificationLevel::Parsed`. `verify_tee_receipt` then verifies
+/// the VCEK → ASK → ARK chain, the report signature, the report policy
+/// (VMPL, MIGRATE_MA, SMT), the TCB and the chip id when the receipt
+/// carries the VCEK (see `snp_chain`).
 pub struct SevSnpQuoteVerifier {
     _private: (), // Force use of constructors
 }
@@ -156,12 +154,13 @@ impl SevSnpQuoteVerifier {
 }
 
 // AMD SEV-SNP attestation report layout (fixed-size C struct per ABI spec).
-const SNP_REPORT_SIZE: usize = 1184;
+#[cfg(test)]
+const SNP_REPORT_SIZE: usize = crate::snp_report::SNP_REPORT_SIZE;
+#[cfg(test)]
 const SNP_VERSION_OFFSET: usize = 0;
 const SNP_REPORT_DATA_OFFSET: usize = 80;
 const SNP_MEASUREMENT_OFFSET: usize = 144;
 const SNP_MEASUREMENT_LEN: usize = 48;
-const SNP_EXPECTED_VERSION: u32 = 2;
 
 impl QuoteVerifier for SevSnpQuoteVerifier {
     fn tee_type(&self) -> TeeType {
@@ -169,23 +168,8 @@ impl QuoteVerifier for SevSnpQuoteVerifier {
     }
 
     fn verify_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedQuote, QuoteVerifyError> {
-        if quote_bytes.len() != SNP_REPORT_SIZE {
-            return Err(QuoteVerifyError::WrongLength {
-                got: quote_bytes.len(),
-                expected: SNP_REPORT_SIZE,
-            });
-        }
-
-        let version = u32::from_le_bytes(
-            quote_bytes[SNP_VERSION_OFFSET..SNP_VERSION_OFFSET + 4]
-                .try_into()
-                .unwrap(),
-        );
-        if version != SNP_EXPECTED_VERSION {
-            return Err(QuoteVerifyError::SnpParseFailed(format!(
-                "version {version}, expected {SNP_EXPECTED_VERSION}"
-            )));
-        }
+        // Size and version (2 to 5) checks.
+        crate::snp_report::parse_report_fields(quote_bytes)?;
 
         let mut user_data = [0u8; 64];
         user_data
@@ -364,6 +348,17 @@ mod tests {
             .verify_quote(&report)
             .unwrap_err();
         assert!(matches!(err, QuoteVerifyError::SnpParseFailed(_)));
+    }
+
+    #[test]
+    fn snp_report_versions_3_and_5_are_parsed() {
+        for version in [3, 5] {
+            let report = build_synthetic_snp_report(version, &[0x11; 64], &[0x22; 48]);
+            let result = SevSnpQuoteVerifier::parsing_only()
+                .verify_quote(&report)
+                .unwrap();
+            assert_eq!(result.fields.user_data, [0x11; 64]);
+        }
     }
 
     #[test]

@@ -108,6 +108,15 @@ was used, because the assurance levels differ significantly:
   `QuoteVerified`; `is_valid()` and `is_valid_parsed()` reject them, and
   `is_valid_simulated()` exists for development and tests. A simulated quote in a receipt that
   claims `TEE_ATTESTED` is rejected.
+- **SEV-SNP report checks** (when the receipt carries the VCEK): VCEK → ASK → ARK chain against
+  the bundled AMD roots; report signature; the report is VCEK-signed (KEY_INFO.SIGNING_KEY = 0,
+  chip key not masked) and not DEBUG; VMPL equals the expected VMPL (default 0); MIGRATE_MA is
+  rejected by default; SMT is accepted by default (GCP N2D runs with SMT) and can be rejected
+  with `ReportPolicy::allow_smt = false`; REPORTED_TCB equals the TCB the VCEK certifies and
+  meets `TcbPolicy` minimums (set them from AMD's current security bulletins; the default
+  rejects only an all-zero TCB); CHIP_ID is present and equals the VCEK hwID; the VCEK and ASK
+  are within their validity windows; and an optional `RevocationCheck` (for example
+  `RevokedSerials` from a verified AMD CRL) is consulted. Nothing is fetched from the network.
 - **Measurement allowlist entries** state what they cover (`platform`). A `gcp-snp-ovmf` match
   supports only "genuine GCP SNP VM running Google-endorsed firmware; relay code not measured".
 
