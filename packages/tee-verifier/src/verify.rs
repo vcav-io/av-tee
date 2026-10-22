@@ -140,6 +140,12 @@ pub struct VerifyOptions {
 }
 
 /// Verify a receipt against a pinned relay key (the usual entry point).
+///
+/// Pass the relay configuration (`relay_config`) for a valid result: only a
+/// v3 transcript counts by default, and it verifies only against the
+/// configuration. With `None` no `is_valid*` method accepts the result,
+/// unless legacy transcripts are allowed through
+/// [`verify_tee_receipt_with_options`].
 pub fn verify_tee_receipt_pinned<'a>(
     receipt: impl Into<TeeReceipt<'a>>,
     pinned_receipt_key: &VerifyingKey,
@@ -340,10 +346,10 @@ pub fn verify_tee_receipt_with_options<'a>(
     //
     // Try v3 (relay config bound; needs the caller-supplied relay config),
     // then v2 (model identity bound), then v1. v1 and v2 are legacy
-    // encodings kept so receipts issued before v3 still verify; they bind
-    // neither relay code nor relay configuration, and they do not count as
-    // valid when the caller supplied a relay config or required v3.
-    // `transcript_schema` still reports which encoding matched.
+    // encodings; they bind neither relay code nor relay configuration, and
+    // they count as valid only when the caller sets allow_legacy_transcripts
+    // and supplies no relay config. `transcript_schema` still reports which
+    // encoding matched.
     let (transcript_hash_valid, transcript_binding, transcript_schema) = {
         let contract_hash = fields.contract_hash;
         let prompt_template_hash = fields.prompt_template_hash.unwrap_or("");

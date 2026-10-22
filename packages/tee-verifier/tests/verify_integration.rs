@@ -283,10 +283,10 @@ fn build_v1_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
     (receipt, signing_key)
 }
 
-/// Verify with the relay key pinned (the key that signed the fixture).
-/// Verify with the key pinned. Opts in to legacy (v1/v2) transcripts, which
-/// the receipts built by [`build_receipt`] and [`build_v1_receipt`] carry, so
-/// tests using it exercise the other checks.
+/// Verify with the relay key pinned (the key that signed the fixture). Opts
+/// in to legacy (v1/v2) transcripts, which the receipts built by
+/// [`build_receipt`] and [`build_v1_receipt`] carry, so tests using it
+/// exercise the other checks.
 fn verify_pinned<'a>(
     receipt: impl Into<tee_verifier::TeeReceipt<'a>>,
     key: &SigningKey,

@@ -90,7 +90,8 @@
   - `tee-verifier` verifies v3 transcripts when the caller supplies the relay configuration
     (`verify_tee_receipt_with_options`, `VerifyOptions::relay_config`), and returns the matched
     configuration. v1 and v2 transcripts are labelled "code/config unbound" and count as
-    valid only with `VerifyOptions::allow_legacy_transcripts` and no relay config (see above). A v3 match is labelled "relay config asserted (not code-attested)".
+    valid only with `VerifyOptions::allow_legacy_transcripts` and no relay config (see
+    above). A v3 match is labelled "relay config asserted (not code-attested)".
   - `ANTHROPIC_BASE_URL` with user info, a query or a fragment stops startup.
   - Golden vectors, including pairs of inputs with quote and delimiter characters that collide
     under the v2 encoding: `tests/fixtures/transcript_v3_golden.json`.

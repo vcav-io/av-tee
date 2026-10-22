@@ -125,8 +125,11 @@ networked step; nothing in this repo fetches them.
 ## Verifying receipts
 
 Use `tee_verifier::verify_tee_receipt_pinned` (or `VerifyOptions::pinned_receipt_key`) with the
-relay key from your configuration. Without a pinned key the signature status is
-`ValidUnpinned` and no `is_valid*` method accepts the result. `tee_attestation.tee_type` must
+relay key from your configuration, and pass the relay configuration (`relay_config`, or
+`VerifyOptions::relay_config`). Without a pinned key the signature status is
+`ValidUnpinned` and no `is_valid*` method accepts the result. Only a v3 transcript counts by
+default, and it verifies only against the relay configuration, so without one no `is_valid*`
+method accepts the result either (v1/v2 receipts need `VerifyOptions::allow_legacy_transcripts`). `tee_attestation.tee_type` must
 match the quote verifier's platform, and a simulated quote is reported as `QuoteSimulated`,
 never as verified. Parse v3 receipts with `receipt_core::parse_receipt_v3_strict` before passing
 them to `TeeReceipt::V3`.
