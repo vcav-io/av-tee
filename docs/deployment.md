@@ -81,7 +81,7 @@ be unsealed under the new policy. On the first start after upgrading:
 2. The receipt signing key changes. Don't take the new key from `GET /tee/info` alone: that
    endpoint is unauthenticated. Take it from a receipt issued after the restart whose attestation
    verifies with `is_valid()` when the key named in its `tee_attestation` is pinned and
-   `VerifyOptions::relay_config` is set, so only a v3 transcript counts (chain-verified quote,
+   `VerifyOptions::relay_config` is set (only a v3 transcript counts; chain-verified quote,
    DEBUG off, allowlisted measurement, transcript binding the key), and compare that key with
    the key in the relay's startup log. Then update every client and verifier that pins it (for
    example `relay_verifying_key_hex` in contracts and `VerifyOptions::pinned_receipt_key`).

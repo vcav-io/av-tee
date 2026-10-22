@@ -51,9 +51,10 @@ with. It doesn't show which relay code computed it, and so it doesn't show that 
 configuration is the one in use: on GCP N2D the SNP measurement covers Google's firmware, not
 the relay, so the `relay_config` at `/tee/info` and the bound hash are operator-asserted. The
 verifier labels a v3 match "relay config asserted (not code-attested)", and the honest claim for
-a receipt is "genuine GCP SNP VM; relay code not measured". When a relay config is supplied, a
-receipt with a v1 or v2 transcript does not verify (it can't be checked against the config);
-without one, such receipts still verify, labelled "code/config unbound". `ANTHROPIC_BASE_URL`
+a receipt is "genuine GCP SNP VM; relay code not measured". Only a v3 transcript verifies by
+default. A receipt with a v1 or v2 transcript (legacy, interpolated without escaping) verifies,
+labelled "code/config unbound", only when the caller sets
+`VerifyOptions::allow_legacy_transcripts` and supplies no relay config. `ANTHROPIC_BASE_URL`
 must not contain user info, a query or a fragment; the relay refuses to start otherwise. The rest
 of the URL, including its path, is published at `/tee/info`, so it must not carry secrets.
 

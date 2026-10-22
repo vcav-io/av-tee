@@ -74,8 +74,9 @@ encoding of all commitments and the relay configuration hash; v1/v2: SHA-512 ove
 an interpolated JSON-like string) and compares it to a reference value from the
 receipt. `transcript_schema` records which version matched: v3 binds a relay
 configuration hash (the caller supplies the configuration, and gets it back to apply
-its own policy); v1 and v2 are labelled "code/config unbound" and don't count as
-valid when the caller supplied a configuration. The relay configuration is
+its own policy); v1 and v2 are labelled "code/config unbound" and count as valid
+only when the caller opts in (`VerifyOptions::allow_legacy_transcripts`) and supplies no
+configuration. The relay configuration is
 operator-asserted: on GCP the measurement doesn't cover the relay code, so the
 `relay_config` published at `/tee/info` and bound into the transcript is what the
 relay says it runs with, not an attested fact ("relay config asserted (not

@@ -284,6 +284,9 @@ fn build_v1_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
 }
 
 /// Verify with the relay key pinned (the key that signed the fixture).
+/// Verify with the key pinned. Opts in to legacy (v1/v2) transcripts, which
+/// the receipts built by [`build_receipt`] and [`build_v1_receipt`] carry, so
+/// tests using it exercise the other checks.
 fn verify_pinned<'a>(
     receipt: impl Into<tee_verifier::TeeReceipt<'a>>,
     key: &SigningKey,
@@ -299,6 +302,7 @@ fn verify_pinned<'a>(
             snp: Some(tee_verifier::VerificationConfig::new(
                 tee_verifier::TcbPolicy::reject_all_zero(),
             )),
+            allow_legacy_transcripts: true,
             ..VerifyOptions::default()
         },
     )
@@ -619,6 +623,68 @@ fn unpinned_verification_is_not_valid() {
     );
     assert!(!result.is_valid_sans_quote());
     assert!(!result.is_valid_simulated());
+}
+
+#[test]
+fn legacy_transcripts_are_not_valid_by_default() {
+    let allowlist = allowlist_with(&simulated_measurement());
+    for (receipt, key, schema) in [
+        {
+            let (r, k) = build_receipt(simulated_quote_builder());
+            (r, k, TranscriptSchema::V2)
+        },
+        {
+            let (r, k) = build_v1_receipt(simulated_quote_builder());
+            (r, k, TranscriptSchema::V1)
+        },
+    ] {
+        let result = verify_tee_receipt_with_options(
+            &receipt,
+            &allowlist,
+            &SimulatedQuoteVerifier,
+            &VerifyOptions {
+                pinned_receipt_key: Some(key.verifying_key()),
+                ..VerifyOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.signature_status,
+            tee_verifier::SignatureStatus::Valid
+        );
+        assert_eq!(result.transcript_schema, Some(schema.clone()), "{schema:?}");
+        assert!(!result.transcript_hash_valid, "{schema:?}");
+        assert!(!result.is_valid_simulated(), "{schema:?}");
+        assert!(!result.is_valid_sans_quote(), "{schema:?}");
+    }
+}
+
+#[test]
+fn unpinned_parsed_quote_is_not_valid() {
+    // Every check but the pin passes: the receipt names its own key.
+    let snp_measurement = [0xBB_u8; 48];
+    let (receipt, _key) = build_receipt(snp_quote_builder(snp_measurement));
+    let allowlist = allowlist_with(&hex::encode(snp_measurement));
+
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist,
+        &SevSnpQuoteVerifier::parsing_only(),
+        &VerifyOptions {
+            allow_legacy_transcripts: true,
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.attestation_status, AttestationStatus::QuoteParsed);
+    assert_eq!(
+        result.signature_status,
+        tee_verifier::SignatureStatus::ValidUnpinned
+    );
+    assert!(result.transcript_hash_valid);
+    assert!(!result.is_valid_parsed());
+    assert!(!result.is_valid_sans_quote());
 }
 
 #[test]
@@ -1264,7 +1330,7 @@ fn v3_transcript_does_not_verify_against_a_different_relay_config() {
 }
 
 #[test]
-fn v3_receipt_with_legacy_v2_transcript_verifies_labelled_unbound() {
+fn v3_receipt_with_legacy_v2_transcript_needs_the_legacy_opt_in() {
     let signing_key = SigningKey::from_bytes(&[7u8; 32]);
     let receipt = build_v3_receipt_with_transcript(
         simulated_quote_builder(),
@@ -1273,19 +1339,33 @@ fn v3_receipt_with_legacy_v2_transcript_verifies_labelled_unbound() {
         None,
     );
     let allowlist = allowlist_with(&simulated_measurement());
+    let pinned = VerifyOptions {
+        pinned_receipt_key: Some(signing_key.verifying_key()),
+        ..VerifyOptions::default()
+    };
 
-    // Without a relay config, a v2 transcript verifies as v2, labelled unbound.
+    // By default the v2 match is reported but not valid.
+    let result =
+        verify_tee_receipt_with_options(&receipt, &allowlist, &SimulatedQuoteVerifier, &pinned)
+            .unwrap();
+    assert_eq!(result.transcript_schema, Some(TranscriptSchema::V2));
+    assert!(!result.transcript_hash_valid);
+    assert!(!result.is_valid_simulated());
+    assert_eq!(result.relay_config_claim(), None);
+
+    // With the opt-in (and no relay config), it verifies as v2, labelled unbound.
     let result = verify_tee_receipt_with_options(
         &receipt,
         &allowlist,
         &SimulatedQuoteVerifier,
         &VerifyOptions {
-            pinned_receipt_key: Some(signing_key.verifying_key()),
-            ..VerifyOptions::default()
+            allow_legacy_transcripts: true,
+            ..pinned
         },
     )
     .unwrap();
     assert!(result.transcript_hash_valid);
+    assert!(result.is_valid_simulated());
     let schema = result.transcript_schema.expect("schema");
     assert_eq!(schema, TranscriptSchema::V2);
     assert!(!schema.binds_relay_config());
@@ -1304,12 +1384,12 @@ fn legacy_transcript_does_not_verify_when_a_relay_config_is_supplied() {
     );
     let allowlist = allowlist_with(&simulated_measurement());
 
-    let explicit = VerifyOptions {
-        require_transcript_v3: true,
-        pinned_receipt_key: Some(signing_key.verifying_key()),
-        ..VerifyOptions::default()
+    // The opt-in for legacy transcripts does not apply with a relay config.
+    let opted_in = VerifyOptions {
+        allow_legacy_transcripts: true,
+        ..options_with(test_relay_config())
     };
-    for options in [options_with(test_relay_config()), explicit] {
+    for options in [options_with(test_relay_config()), opted_in] {
         let result = verify_tee_receipt_with_options(
             &receipt,
             &allowlist,

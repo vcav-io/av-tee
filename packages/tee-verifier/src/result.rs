@@ -32,6 +32,9 @@ pub enum AttestationStatus {
 /// `None` in `TeeVerificationResult::transcript_schema` means neither schema
 /// matched (transcript hash invalid).
 ///
+/// V1 and V2 matches count as valid only when the caller sets
+/// `VerifyOptions::allow_legacy_transcripts` (and supplies no relay config).
+///
 /// **Caller guidance:** `transcript_hash_valid == true` with
 /// `transcript_schema == Some(V1)` means the transcript matched but model
 /// identity was NOT hardware-bound — it is only a relay-asserted claim.
@@ -80,9 +83,10 @@ pub struct TeeVerificationResult {
     /// `Some(V3)` means model identity and a relay configuration hash are
     /// bound (the configuration is relay-asserted, not code-attested, unless
     /// the measurement covers the relay code).
-    /// `Some(V2)` means model identity is bound; code/config unbound. With a
-    /// relay config supplied (or v3 required), v1/v2 matches are reported
-    /// here but `transcript_hash_valid` is false.
+    /// `Some(V2)` means model identity is bound; code/config unbound. v1/v2
+    /// matches are reported here, but `transcript_hash_valid` is false unless
+    /// the caller set `VerifyOptions::allow_legacy_transcripts` (and supplied
+    /// no relay config).
     /// `Some(V1)` means legacy — model identity is NOT in the transcript.
     /// `None` means neither schema matched (transcript hash invalid).
     pub transcript_schema: Option<TranscriptSchema>,
