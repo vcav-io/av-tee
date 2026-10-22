@@ -1,7 +1,9 @@
 # selkey-tee
 
-The confidential execution lane for [Selkey](https://github.com/vcav-io/selkey). It runs the
-Selkey relay protocol inside an AMD SEV-SNP confidential VM.
+The confidential execution lane for [Selkey](https://github.com/vcav-io/selkey). It is designed to run
+the Selkey relay protocol inside an AMD SEV-SNP confidential VM. Today it implements the bounded
+session flow (no invites), and the default image runs the simulated runtime (see
+[Known gaps](docs/deployment.md#known-gaps)).
 
 **Status: prototype, not yet secure.** Don't rely on it for confidentiality. The default
 container image runs the simulated runtime, which has no hardware isolation, and the SEV-SNP
@@ -150,9 +152,9 @@ before transcript v3 carry a v2 transcript, and `tee-verifier` still accepts the
   measurement most likely covers the guest firmware only, not the kernel, the container image
   or the relay. So a matching measurement doesn't show which relay code ran. See
   [docs/reproducible-builds.md](docs/reproducible-builds.md).
-- **Clients don't yet verify attestation before sending inputs.** The relay produces attestable
-  receipts, but don't treat it as secure against an active man-in-the-middle until clients
-  verify attestation first.
+- **Clients don't yet verify attestation before sending inputs.** Selkey clients have no TEE
+  lane input path yet. The relay produces attestable receipts, but don't treat it as secure
+  against an active man-in-the-middle until clients verify attestation first.
 - **Builds aren't yet reproducible end to end.** The binary artifact hash is reproducible, but
   the SNP measurement isn't. See [docs/reproducible-builds.md](docs/reproducible-builds.md).
 - **No live transparency log yet.** Publishing enclave measurements is still open:

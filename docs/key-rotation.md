@@ -5,8 +5,8 @@
 The TEE relay's Ed25519 signing key is sealed to the CVM. Rotation happens
 by restarting the enclave with the sealed key file removed:
 
-1. Move aside `/var/lib/selkey-tee/sealed_signing_key.sev-snp` (`sealed_signing_key` for the
-   simulated runtime)
+1. Move `$SELKEY_TEE_DATA_DIR/sealed_signing_key.sev-snp` aside (`sealed_signing_key` for the
+   simulated runtime; the data directory is `/var/lib/selkey-tee` in `docker-compose.tee.yml`)
 2. Restart the relay process
 3. A new key is generated, sealed, and used for all subsequent receipts
 
@@ -52,16 +52,26 @@ it matches a relay key the verifier trusts (see the caveat above).
 ## Rotation procedure
 
 ```bash
-# 1. Stop the relay (optional — prevents mid-session interruption)
-docker compose stop tee-relay
+# 0. Record the current public key (old receipts verify with the public key alone)
+curl -s http://localhost:3100/tee/info | jq .receipt_signing_pubkey_hex
 
-# 2. Move the sealed key aside (keep it until no receipts signed with it need checking)
-docker compose exec tee-relay mv /var/lib/selkey-tee/sealed_signing_key.sev-snp \
-  /var/lib/selkey-tee/sealed_signing_key.sev-snp.retired
+# 1. Stop the relay (open sessions are lost)
+docker compose -f docker-compose.tee.yml stop tee-relay
+
+# 2. Move the sealed key aside in the data volume. `exec` needs a running
+#    container, so use a one-off container on the same volume. On the simulated
+#    runtime the file is `sealed_signing_key` (no suffix).
+docker compose -f docker-compose.tee.yml run --rm --no-deps --entrypoint mv tee-relay \
+  /var/lib/selkey-tee/sealed_signing_key.sev-snp /var/lib/selkey-tee/sealed_signing_key.sev-snp.retired
 
 # 3. Restart — new key is generated and sealed
-docker compose start tee-relay
+docker compose -f docker-compose.tee.yml start tee-relay
 
 # 4. Verify new key via /tee/info
 curl -s http://localhost:3100/tee/info | jq .receipt_signing_pubkey_hex
 ```
+
+Once the new key is confirmed, delete the `.retired` file: verifying old
+receipts needs only the recorded public key, and the retired blob can still be unsealed
+by a guest with the same measurement and policy (with the simulated runtime it is effectively the plaintext key).
+Delete it promptly after a suspected compromise.

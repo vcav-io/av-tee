@@ -80,8 +80,9 @@ be unsealed under the new policy. On the first start after upgrading:
    once no receipt signed with it needs checking).
 2. The receipt signing key changes. Don't take the new key from `GET /tee/info` alone: that
    endpoint is unauthenticated. Take it from a receipt issued after the restart whose attestation
-   verifies with `is_valid()` (chain-verified quote, DEBUG off, allowlisted measurement, v3
-   transcript binding the key), checking the key named in `tee_attestation`, and compare it with
+   verifies with `is_valid()` when the key named in its `tee_attestation` is pinned and
+   `VerifyOptions::relay_config` is set, so only a v3 transcript counts (chain-verified quote,
+   DEBUG off, allowlisted measurement, transcript binding the key), and compare that key with
    the key in the relay's startup log. Then update every client and verifier that pins it (for
    example `relay_verifying_key_hex` in contracts and `VerifyOptions::pinned_receipt_key`).
    While the measurement doesn't cover the relay code, this shows the key is held in a genuine
@@ -175,14 +176,16 @@ roots) is rejected.
 curl -s http://localhost:3100/tee/info | jq .
 
 # Expected response includes:
-# - tee_type: "Simulated" (or "SevSnp" in production)
+# - tee_type: "Simulated" (or "SEV-SNP" on SEV-SNP hardware)
 # - measurement: hex string
 # - receipt_signing_pubkey_hex: hex string
 ```
 
 ## Production prerequisites
 
-Before using in production:
+The relay is a prototype, not yet secure. The items below are necessary before any
+production use, but they are not sufficient: even with all of them, the measurement
+doesn't cover the relay code and the gaps listed under [Known gaps](#known-gaps) remain.
 
 1. **Real CVM**: Deploy on AMD SEV-SNP with an `snp` build (see above). `SimulatedCvm` provides
    no hardware isolation. The default image built from `Dockerfile.enclave` doesn't enable the
@@ -197,3 +200,32 @@ Before using in production:
    on loopback or behind an authenticating proxy.
 5. **Monitoring**: The relay logs metadata (session IDs, error types) but never
    plaintext. All log lines are annotated with `// SAFETY: no plaintext`.
+
+## Known gaps
+
+Beyond the caveats in the README (simulated default image, provider-reported model identity),
+the current relay and verifier have these gaps:
+
+- **Measurement doesn't cover the relay code.** There's no measured boot. On GCP N2D the SNP
+  launch measurement covers Google's firmware, so a receipt supports only "genuine GCP SNP VM;
+  relay code not measured", and the sealed key is bound to a measurement other guest code
+  shares.
+- **Relay configuration is operator-asserted.** The `relay_config` published at `/tee/info`
+  and bound into transcript v3 is what the relay states it runs with, not an attested fact.
+- **No client input path.** Selkey clients don't yet encrypt inputs to the TEE lane or verify
+  its attestation before sending them.
+- **Relay key trust.** There is no trust root for the receipt signing key beyond the key the
+  verifier pins. `/tee/info` is unauthenticated, so take a new key from a verified receipt (see
+  [Migration from `av-tee-seal-v2`](#migration-from-av-tee-seal-v2)).
+- **Access control.** `POST /sessions` and `/tee/info` are unauthenticated, and there are no
+  rate or session-count limits.
+- **Entropy is per session only.** The relay doesn't accumulate disclosure across sessions;
+  there is no cross-session ledger in the TEE lane.
+- **Contract coverage.** Fields tee-relay doesn't enforce (`timing_class`,
+  `enforcement_policy_hash`, model profile or constraints, session or invite TTL) are rejected
+  at `POST /sessions` rather than enforced, there is no schema registry, and Anthropic is the
+  only provider.
+- **Platforms.** Only AMD Milan and Genoa are supported by the SEV-SNP report checks; Turin is
+  rejected.
+- **No live transparency log** for measurements
+  ([#15](https://github.com/vcav-io/selkey-tee/issues/15)).

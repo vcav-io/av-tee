@@ -33,7 +33,7 @@ measurement does not identify the relay code that ran.
 | Side-channel attacks | SEV-SNP has known side-channel surface | Platform vendor patches, not application-level |
 | Firmware compromise | CVM trusts AMD PSP firmware | Supply chain trust — out of scope |
 | Denial of service | Operator controls network/compute | Operational, not confidentiality |
-| Metadata leakage | Timing, message sizes, session counts visible | Timing classes (contract field), padding (future) |
+| Metadata leakage | Timing, message sizes, session counts visible | None yet: there is no timing or size padding, and contracts that set `timing_class` are rejected rather than enforced |
 | Relay software bugs | CVM protects memory, not logic | Code review, testing, reproducible builds |
 
 ## Operator blindness
@@ -85,20 +85,22 @@ was used, because the assurance levels differ significantly:
 
 | Binding | Source field | Assurance | When it occurs |
 |---------|-------------|-----------|----------------|
-| **UserData** | `tee_attestation.user_data_hex` | Hardware-bound — the hash is inside the SEV-SNP attestation report, signed by the platform. Shows the report was requested by code in a CVM with this launch measurement (which doesn't yet cover the relay binary). | Real CVM with attestation support |
-| **TranscriptHashFallback** | `tee_attestation.transcript_hash_hex` | Relay-asserted — the hash is correct but set by the relay software, not bound into the attestation. A compromised relay could substitute a different hash without detection. | Simulated mode, or real CVM before `user_data` binding was deployed |
+| **UserData** | `tee_attestation.user_data_hex` | Depends on `attestation_status`. With `QuoteVerified` (SEV-SNP quote, VCEK chain and report checks passed) the hash is inside the hardware-signed report and shows the report was requested by code in a CVM with this launch measurement (which doesn't yet cover the relay binary). With `QuoteParsed` the report's `REPORT_DATA` matches but its signature wasn't checked. With `QuoteSimulated` nothing is hardware-bound. | Whenever `user_data_hex` is present, including the simulated runtime |
+| **TranscriptHashFallback** | `tee_attestation.transcript_hash_hex` | Relay-asserted: the hash is set by the relay software, not bound into the attestation. Such a receipt never passes an `is_valid*` method, because the quote is then either missing (`MissingQuote`) or lacks `user_data_hex` (`MissingReceiptUserData`). | Receipts without `user_data_hex` (older relays) |
 | **None** | *(neither field present)* | Unverifiable — no reference exists to compare against. | Malformed or very old receipts |
 
 ### Recommendations for callers
 
-- **Production verifiers** should require `TranscriptBinding::UserData`. Accept
-  `TranscriptHashFallback` only during a migration window when older receipts
-  are still in circulation.
-- **Display/debugging UIs** may show the binding level alongside the
-  `transcript_hash_valid` boolean so operators can triage assurance.
-- `is_valid()` and `is_valid_sans_quote()` check `transcript_hash_valid` but
-  do **not** enforce a minimum binding level — callers must check
-  `transcript_binding` themselves if they need hardware-bound assurance.
+- **Production verifiers** should use `is_valid()`, which requires `QuoteVerified` (the
+  SEV-SNP quote verifier with chain and report checks; never a simulated or parsed-only
+  quote), a pinned key, an allowlisted measurement and a valid transcript. Every result that
+  passes an `is_valid*` method has `UserData` binding, so the binding level alone doesn't
+  distinguish a hardware-signed report from a simulated one: check `attestation_status`.
+- `is_valid_simulated()` accepts `QuoteSimulated` for development and tests only, and
+  `is_valid_sans_quote()` accepts any quote not found invalid (`QuoteParsed`, `QuoteVerified` or
+  `QuoteSimulated`); neither shows that the report was hardware-signed.
+- **Display/debugging UIs** may show `attestation_status`, `transcript_binding` and
+  `relay_config_claim()` so operators can triage assurance.
 
 ## Verifier checks
 
@@ -140,7 +142,7 @@ cannot make the relay fetch or read anything. Output numbers are normalised (int
 floats become integers) before validation, and the output is delivered and hashed in canonical
 RFC 8785 form, so alternative spellings of the same value can't widen the channel beyond the
 schema bound. The relay enforces the entropy budget per session only. Accumulating disclosure across
-sessions is tracked client-side (the selkey-mcp entropy ledger), not by tee-relay.
+sessions is not tracked for the TEE lane (clients have no TEE input path yet).
 
 ## Simulated mode caveats
 
