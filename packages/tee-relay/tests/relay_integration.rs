@@ -1441,3 +1441,37 @@ async fn session_creation_rejects_a_ref_to_a_subschema_declaring_another_draft()
     let error = assert_contract_rejected_at_creation(&client, &base, contract).await;
     assert!(error.contains("output schema"), "{error}");
 }
+
+#[tokio::test]
+async fn session_creation_rejects_references_under_const_and_enum_nodes() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reference = serde_json::json!({"$ref": format!("http://127.0.0.1:{port}/s.json")});
+    let draft = serde_json::json!({"$schema": "http://json-schema.org/draft-04/schema#"});
+
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    for decision in [
+        serde_json::json!({"const": "HALT", "properties": {"x": reference.clone()}}),
+        serde_json::json!({"enum": ["PROCEED", "HALT"], "properties": {"x": reference.clone()}}),
+        serde_json::json!({"const": "HALT", "items": draft.clone()}),
+        serde_json::json!({"enum": ["PROCEED", "HALT"], "items": draft.clone()}),
+    ] {
+        let mut contract = test_contract();
+        contract.output_schema = serde_json::json!({
+            "type": "object",
+            "properties": { "decision": decision },
+            "required": ["decision"],
+            "additionalProperties": false
+        });
+        let error = assert_contract_rejected_at_creation(&client, &base, contract).await;
+        assert!(error.contains("output schema"), "{decision}: {error}");
+    }
+    assert!(
+        matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "no connection may reach the listener"
+    );
+}

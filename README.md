@@ -82,8 +82,10 @@ it as `receipt`. In the TEE lane:
   field the contract sets. A rejected contract gets `400` and no session. What is enforced:
   - `output_schema`: strict inline schemas only (tee-relay has no schema registry): closed
     objects with every property required, strings bounded by `enum` or `maxLength`, arrays by
-    `maxItems`, integers by `minimum`/`maximum`; no `$schema`, `$ref` or composition. Output is
-    validated as JSON Schema draft 7, and `output_schema_hash`, if set, must match.
+    `maxItems`, integers by `minimum`/`maximum`; no `$schema`, `$ref` or composition at any
+    depth, and no subschemas under `enum`/`const` nodes or object/array keywords on nodes of
+    another type. Output is validated as JSON Schema draft 7, and `output_schema_hash`, if set,
+    must match. The validator is built without remote or file reference resolution.
   - `entropy_budget_bits` / `entropy_enforcement`: the relay computes the schema's entropy upper
     bound from its structure. With `Gate` (default) or `Strict`, a bound above the budget is
     rejected; `Advisory` only logs. Per session only; nothing accumulates across sessions.

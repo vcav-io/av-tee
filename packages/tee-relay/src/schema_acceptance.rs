@@ -128,13 +128,21 @@ const ALLOWED_KEYWORDS: &[&str] = &[
     "maximum",
 ];
 
+/// Keywords that apply only to object schemas (and carry subschemas).
+const OBJECT_KEYWORDS: &[&str] = &["properties", "required", "additionalProperties"];
+
+/// Keywords that apply only to array schemas (`items` carries a subschema).
+const ARRAY_KEYWORDS: &[&str] = &["items", "minItems", "maxItems", "uniqueItems"];
+
 /// Check that an inline schema is strict and compute its entropy upper bound.
 ///
 /// A strict schema:
 /// - is a JSON object at every node (no `true`/`false` schemas) and every node
 ///   declares a single `type`, an `enum`, or a `const`;
 /// - uses only [`ALLOWED_KEYWORDS`] (no `$schema`, composition, references,
-///   `patternProperties` or other dynamic properties);
+///   `patternProperties` or other dynamic properties) at every node,
+///   including nodes under `enum`/`const` (which may carry no subschemas)
+///   and object/array keywords only on nodes of that type;
 /// - sets `additionalProperties: false` on every object and lists every
 ///   property in `required`;
 /// - bounds every string with `enum` or `maxLength`, every array with
@@ -176,6 +184,28 @@ fn node_bound(node: &Value, path: &str, depth: usize) -> Result<u64, String> {
     for key in obj.keys() {
         if !key.starts_with("x-") && !ALLOWED_KEYWORDS.contains(&key.as_str()) {
             return Err(format!("{path}: keyword '{key}' is not allowed"));
+        }
+    }
+
+    // Keywords that carry subschemas or apply to one type only. The bound
+    // below visits a node's subschemas only for its own type, so they are
+    // rejected wherever they would not be visited: on const/enum nodes and
+    // on nodes of another type. Every subschema the validator compiles is
+    // therefore checked by this function.
+    let is_value_node = obj.contains_key("enum") || obj.contains_key("const");
+    let node_type = obj.get("type").and_then(Value::as_str);
+    for key in OBJECT_KEYWORDS {
+        if obj.contains_key(*key) && (is_value_node || node_type != Some("object")) {
+            return Err(format!(
+                "{path}: keyword '{key}' is allowed only on object schemas without enum or const"
+            ));
+        }
+    }
+    for key in ARRAY_KEYWORDS {
+        if obj.contains_key(*key) && (is_value_node || node_type != Some("array")) {
+            return Err(format!(
+                "{path}: keyword '{key}' is allowed only on array schemas without enum or const"
+            ));
         }
     }
 
@@ -317,6 +347,43 @@ mod tests {
             json!({"type": "object", "properties": {"a": {"anyOf": [{"type": "string"}]}}, "required": ["a"], "additionalProperties": false}),
             json!({"type": "object", "patternProperties": {".*": {"type": "string"}}, "additionalProperties": false}),
         ]
+    }
+
+    /// Subschemas and references hidden under nodes whose bound does not
+    /// depend on them (const/enum nodes, or keywords for another type).
+    fn hidden_subschema_schemas() -> Vec<Value> {
+        let reference = json!({"$ref": "http://127.0.0.1:9/s.json"});
+        let draft = json!({"$schema": "http://json-schema.org/draft-04/schema#"});
+        let wrap = |inner: Value| {
+            json!({
+                "type": "object",
+                "properties": { "signal": inner },
+                "required": ["signal"],
+                "additionalProperties": false
+            })
+        };
+        vec![
+            wrap(json!({"const": "OK", "properties": {"x": reference.clone()}})),
+            wrap(json!({"const": "OK", "items": draft.clone()})),
+            wrap(json!({"enum": ["A", "B"], "properties": {"x": reference.clone()}})),
+            wrap(json!({"enum": ["A", "B"], "items": draft.clone()})),
+            wrap(json!({"const": "OK", "additionalProperties": reference.clone()})),
+            wrap(json!({"type": "string", "maxLength": 4, "properties": {"x": reference.clone()}})),
+            wrap(json!({"type": "string", "maxLength": 4, "items": draft.clone()})),
+            wrap(json!({"type": "boolean", "additionalProperties": reference.clone()})),
+            wrap(json!({"type": "integer", "minimum": 0, "maximum": 3, "items": reference})),
+        ]
+    }
+
+    #[test]
+    fn subschemas_under_const_enum_or_other_types_are_rejected() {
+        for schema in hidden_subschema_schemas() {
+            assert!(
+                strict_schema_upper_bound(&schema).is_err(),
+                "{schema} should be rejected"
+            );
+            assert!(accept_output_schema(&contract_with(schema.clone(), None)).is_err());
+        }
     }
 
     #[test]

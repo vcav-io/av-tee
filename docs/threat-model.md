@@ -130,11 +130,13 @@ was used, because the assurance levels differ significantly:
 
 `POST /sessions` rejects a contract the relay can't run as specified before any input is
 submitted: an unsupported prompt template, a relay key pin that isn't this relay's key, a
-non-strict output schema (including any `$schema` or `$ref`), a schema whose entropy upper
+non-strict output schema (including any `$schema` or `$ref` at any depth, or subschemas under
+`enum`/`const` nodes), a schema whose entropy upper
 bound exceeds the contract's budget (with `Gate` or `Strict` enforcement), or a field tee-relay
 doesn't enforce (`timing_class`, `enforcement_policy_hash`, model profile or constraints,
 session or invite TTL). Output is validated as JSON Schema draft 7 whatever the schema
-declares. The relay enforces the entropy budget per session only. Accumulating disclosure across
+declares, and the validator is built without HTTP or file reference resolution, so a schema
+cannot make the relay fetch or read anything. The relay enforces the entropy budget per session only. Accumulating disclosure across
 sessions is tracked client-side (the selkey-mcp entropy ledger), not by tee-relay.
 
 ## Simulated mode caveats

@@ -249,8 +249,10 @@ pub fn compile_output_schema(
 /// Validate JSON output against a JSON Schema (draft 7).
 ///
 /// Only called from `relay_core` after `validate_contract_support`, so every
-/// schema validated here has passed the strict check (no `$schema`, `$ref`
-/// or composition); tee-relay has no registry path.
+/// schema validated here has passed the strict check, which visits every
+/// subschema (no `$schema`, `$ref` or composition at any depth); tee-relay
+/// has no registry path. jsonschema is built without its HTTP and file
+/// resolvers, so a reference could not be fetched in any case.
 fn validate_output_schema(
     output: &serde_json::Value,
     schema: &serde_json::Value,
@@ -852,6 +854,32 @@ mod tests {
         assert!(
             super::validate_output_schema(&serde_json::json!({"day": "free text"}), &schema)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn output_schema_compilation_does_not_fetch_remote_references() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for target in [
+            format!("http://127.0.0.1:{port}/s.json"),
+            "file:///etc/hosts".to_string(),
+        ] {
+            let schema = serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "$ref": target } },
+                "required": ["x"],
+                "additionalProperties": false
+            });
+            assert!(
+                super::compile_output_schema(&schema).is_err(),
+                "{target}: reference must not resolve"
+            );
+        }
+        assert!(
+            matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "no connection may reach the listener"
         );
     }
 

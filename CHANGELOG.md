@@ -16,7 +16,9 @@
     `enforcement_policy_hash`, `model_profile_id`/`model_profile_hash`, `model_constraints`,
     `session_ttl_secs`, `invite_ttl_secs`. `metadata` is accepted as descriptive only.
   - Output is validated as JSON Schema draft 7 (with formats) regardless of `$schema`, and
-    strict inline schemas may not carry `$schema`.
+    strict inline schemas may not carry `$schema`. The strict check visits every subschema:
+    `enum`/`const` nodes may not carry subschemas, and object/array keywords are allowed only on
+    nodes of that type. jsonschema is built without HTTP/file reference resolution.
   - Failure receipts for schema-rejected output have status `rejected` and `signal_class`
     `schema_validation_failed` (was `error` / `inference_error`); provider failures are
     `provider_error`.
