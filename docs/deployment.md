@@ -129,11 +129,13 @@ match the quote verifier's platform, and a simulated quote is reported as `Quote
 never as verified. Parse v3 receipts with `receipt_core::parse_receipt_v3_strict` before passing
 them to `TeeReceipt::V3`.
 
-For SEV-SNP receipts, set `VerifyOptions::snp`:
+For SEV-SNP receipts, set `VerifyOptions::snp` to
+`VerificationConfig::new(tcb_policy)`. Without it, a receipt that carries a VCEK is reported as
+`QuoteInvalid(TcbPolicyRequired)`; there is no default TCB policy.
 
-- `tcb_policy`: minimum boot loader, TEE, SNP and microcode versions. Take them from AMD's
-  current security bulletins for the product family you run on; the default only rejects an
-  all-zero TCB.
+- `tcb_policy`: `TcbPolicy::minimums(boot_loader, tee, snp, microcode)` with floors from AMD's
+  current security bulletins for the product family you run on. (`TcbPolicy::reject_all_zero()`
+  accepts any non-zero TCB and is not a floor.)
 - `report_policy`: expected VMPL (default 0), whether SMT is acceptable (default yes, as on GCP
   N2D), whether a migration agent is acceptable (default no), and whether CHIP_ID must match the
   VCEK (default yes).
@@ -141,6 +143,9 @@ For SEV-SNP receipts, set `VerifyOptions::snp`:
   `https://kdsintf.amd.com/vcek/v1/{Milan,Genoa}/crl`. Fetch it out of band, verify it is signed
   by the ARK, and pass the revoked serial numbers as `RevokedSerials`.
 - `verification_time`: the time the VCEK and ASK must be valid at (default: now).
+
+Only AMD Milan and Genoa are supported. Turin (different TCB layout and hwID length, no bundled
+roots) is rejected.
 
 ## Environment variables
 

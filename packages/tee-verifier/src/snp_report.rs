@@ -3,6 +3,10 @@
 //! Offsets follow the AMD SEV-SNP ABI specification (ATTESTATION_REPORT,
 //! report versions 2 to 5). The fields read here have the same offsets in
 //! all of these versions.
+//!
+//! Only Milan and Genoa are supported (the bundled AMD roots). Turin uses a
+//! different TCB_VERSION layout (FMC byte first) and an 8-byte hwID, and is
+//! rejected by the chain check (no bundled Turin roots).
 
 use crate::quote::QuoteVerifyError;
 

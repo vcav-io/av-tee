@@ -36,6 +36,8 @@ pub enum QuoteVerifyError {
     },
     #[error("simulated attestation in a receipt that claims TEE_ATTESTED assurance")]
     SimulatedClaimsTeeAttested,
+    #[error("SEV-SNP chain verification needs a VerificationConfig with an explicit TCB policy")]
+    TcbPolicyRequired,
 }
 
 /// The level of cryptographic assurance the verifier provides.

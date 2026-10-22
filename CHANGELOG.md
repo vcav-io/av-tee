@@ -15,6 +15,10 @@
   - VCEK and ASK validity windows (`VerificationConfig::verification_time`) and an optional
     `RevocationCheck` hook (`RevokedSerials`).
   - Report versions 2 to 5 are accepted (the checked fields have the same offsets).
+  - No default TCB policy: `TcbPolicy` and `VerificationConfig` no longer implement `Default`.
+    Build `VerificationConfig::new(TcbPolicy::minimums(..))`; `VerifyOptions::snp` is an
+    `Option`, and a receipt with a VCEK but no configuration is `QuoteInvalid(TcbPolicyRequired)`.
+  - Milan and Genoa only (no Turin).
 
 - TEE runtime hardening:
   - The relay no longer falls back to the simulated runtime silently. A build without `snp`
