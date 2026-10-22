@@ -154,6 +154,27 @@ async fn start_relay_server(mock_url: &str) -> String {
     format!("http://{addr}")
 }
 
+/// POST /sessions answers 400 with an error message, and returns no session.
+async fn assert_contract_rejected_at_creation(
+    client: &reqwest::Client,
+    base: &str,
+    contract: vault_family_types::Contract,
+) -> String {
+    let resp = client
+        .post(format!("{base}/sessions"))
+        .json(&CreateSessionRequest {
+            contract: serde_json::to_value(contract).unwrap(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body.get("session_id").is_none());
+    assert!(body.get("initiator_submit_token").is_none());
+    body["error"].as_str().expect("error message").to_string()
+}
+
 async fn submit_both_inputs_and_wait_for_abort(
     client: &reqwest::Client,
     base: &str,
@@ -1156,54 +1177,40 @@ async fn relay_plaintext_role_label_mismatch_aborts_session() {
 }
 
 #[tokio::test]
-async fn relay_rejects_mismatched_relay_verifying_key() {
+async fn session_creation_rejects_mismatched_relay_verifying_key() {
     let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
     let base = start_relay_server(&mock_url).await;
     let client = reqwest::Client::new();
 
     let mut contract = test_contract();
     contract.relay_verifying_key_hex = Some("f".repeat(64));
-    let session = create_session(&client, &base, contract).await;
-    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
-
-    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
-    let receipt = output.receipt.expect("failure receipt");
-    assert_eq!(
-        receipt.claims.status,
-        Some(receipt_core::SessionStatus::Error)
-    );
+    assert_contract_rejected_at_creation(&client, &base, contract).await;
 }
 
 #[tokio::test]
-async fn relay_rejects_unsupported_model_profile_id() {
+async fn session_creation_rejects_unsupported_model_profile_id() {
     let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
     let base = start_relay_server(&mock_url).await;
     let client = reqwest::Client::new();
 
     let mut contract = test_contract();
     contract.model_profile_id = Some("profile-1".to_string());
-    let session = create_session(&client, &base, contract).await;
-    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
-
-    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    assert_contract_rejected_at_creation(&client, &base, contract).await;
 }
 
 #[tokio::test]
-async fn relay_rejects_unsupported_model_profile_hash() {
+async fn session_creation_rejects_unsupported_model_profile_hash() {
     let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
     let base = start_relay_server(&mock_url).await;
     let client = reqwest::Client::new();
 
     let mut contract = test_contract();
     contract.model_profile_hash = Some("f".repeat(64));
-    let session = create_session(&client, &base, contract).await;
-    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
-
-    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    assert_contract_rejected_at_creation(&client, &base, contract).await;
 }
 
 #[tokio::test]
-async fn relay_rejects_unsupported_model_constraints() {
+async fn session_creation_rejects_unsupported_model_constraints() {
     let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
     let base = start_relay_server(&mock_url).await;
     let client = reqwest::Client::new();
@@ -1214,38 +1221,29 @@ async fn relay_rejects_unsupported_model_constraints() {
         allowed_models: vec![],
         min_tier: None,
     });
-    let session = create_session(&client, &base, contract).await;
-    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
-
-    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    assert_contract_rejected_at_creation(&client, &base, contract).await;
 }
 
 #[tokio::test]
-async fn relay_rejects_mismatched_output_schema_hash() {
+async fn session_creation_rejects_mismatched_output_schema_hash() {
     let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
     let base = start_relay_server(&mock_url).await;
     let client = reqwest::Client::new();
 
     let mut contract = test_contract();
     contract.output_schema_hash = Some("f".repeat(64));
-    let session = create_session(&client, &base, contract).await;
-    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
-
-    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    assert_contract_rejected_at_creation(&client, &base, contract).await;
 }
 
 #[tokio::test]
-async fn relay_rejects_unsupported_prompt_template_hash() {
+async fn session_creation_rejects_unsupported_prompt_template_hash() {
     let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
     let base = start_relay_server(&mock_url).await;
     let client = reqwest::Client::new();
 
     let mut contract = test_contract();
     contract.prompt_template_hash = "a".repeat(64);
-    let session = create_session(&client, &base, contract).await;
-    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
-
-    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    assert_contract_rejected_at_creation(&client, &base, contract).await;
 }
 
 #[tokio::test]
@@ -1285,4 +1283,277 @@ async fn relay_config_hash_differs_between_provider_base_urls() {
         state_a.app.relay_config().hash_hex(),
         state_b.app.relay_config().hash_hex()
     );
+}
+
+#[tokio::test]
+async fn session_creation_rejects_permissive_output_schemas() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    for schema in [
+        serde_json::json!({}),
+        serde_json::json!(true),
+        serde_json::json!({"type": "object"}),
+        serde_json::json!({
+            "type": "object",
+            "properties": {"free": {"type": "string"}},
+            "required": ["free"],
+            "additionalProperties": false
+        }),
+    ] {
+        let mut contract = test_contract();
+        contract.output_schema = schema.clone();
+        let error = assert_contract_rejected_at_creation(&client, &base, contract).await;
+        assert!(error.contains("output schema"), "{schema}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn session_creation_enforces_the_entropy_budget() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    // The test schema's upper bound is 1 bit (two enum values).
+    let mut contract = test_contract();
+    contract.entropy_budget_bits = Some(0);
+    let error = assert_contract_rejected_at_creation(&client, &base, contract.clone()).await;
+    assert!(error.contains("exceeds contract budget"), "{error}");
+
+    contract.entropy_enforcement = Some(vault_family_types::EntropyEnforcementMode::Advisory);
+    let session = create_session(&client, &base, contract).await;
+    assert!(!session.session_id.is_empty());
+
+    let mut within = test_contract();
+    within.entropy_budget_bits = Some(1);
+    create_session(&client, &base, within).await;
+}
+
+#[tokio::test]
+async fn schema_rejected_output_gets_a_rejected_receipt() {
+    // Valid JSON that the contract's schema rejects.
+    let mock_url = start_mock_provider(r#"{"decision":"MAYBE"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let session = create_session(&client, &base, test_contract()).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+
+    assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
+    assert!(output.output.is_none());
+    let receipt = output.receipt.expect("failure receipt");
+    assert_eq!(
+        receipt.claims.status,
+        Some(receipt_core::SessionStatus::Rejected)
+    );
+    assert_eq!(
+        receipt.claims.signal_class.as_deref(),
+        Some("schema_validation_failed")
+    );
+}
+
+#[tokio::test]
+async fn provider_failure_gets_an_error_receipt() {
+    let base = start_relay_server(&start_failing_mock_provider(500).await).await;
+    let client = reqwest::Client::new();
+
+    let session = create_session(&client, &base, test_contract()).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+
+    let receipt = output.receipt.expect("failure receipt");
+    assert_eq!(
+        receipt.claims.status,
+        Some(receipt_core::SessionStatus::Error)
+    );
+    assert_eq!(
+        receipt.claims.signal_class.as_deref(),
+        Some("provider_error")
+    );
+}
+
+#[tokio::test]
+async fn session_creation_rejects_contract_fields_the_tee_lane_does_not_enforce() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    type Edit = Box<dyn Fn(&mut vault_family_types::Contract)>;
+    let cases: Vec<(&str, Edit)> = vec![
+        (
+            "timing_class",
+            Box::new(|c| c.timing_class = Some("fixed".into())),
+        ),
+        (
+            "enforcement_policy_hash",
+            Box::new(|c| c.enforcement_policy_hash = Some("ab".repeat(32))),
+        ),
+        (
+            "session_ttl_secs",
+            Box::new(|c| c.session_ttl_secs = Some(60)),
+        ),
+        (
+            "invite_ttl_secs",
+            Box::new(|c| c.invite_ttl_secs = Some(60)),
+        ),
+    ];
+    for (field, edit) in cases {
+        let mut contract = test_contract();
+        edit(&mut contract);
+        let error = assert_contract_rejected_at_creation(&client, &base, contract).await;
+        assert!(error.contains(field), "{field}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn session_creation_accepts_descriptive_metadata_and_supported_fields() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.metadata = serde_json::json!({"scenario": "test", "version": "1"});
+    contract.max_completion_tokens = Some(256);
+    contract.entropy_budget_bits = Some(8);
+    contract.entropy_enforcement = Some(vault_family_types::EntropyEnforcementMode::Strict);
+    create_session(&client, &base, contract).await;
+}
+
+#[tokio::test]
+async fn session_creation_rejects_a_ref_to_a_subschema_declaring_another_draft() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.output_schema = serde_json::json!({
+        "type": "object",
+        "properties": { "decision": { "$ref": "#/definitions/fixed" } },
+        "required": ["decision"],
+        "additionalProperties": false,
+        "definitions": {
+            "fixed": {
+                "$schema": "http://json-schema.org/draft-04/schema#",
+                "const": "OK"
+            }
+        }
+    });
+    let error = assert_contract_rejected_at_creation(&client, &base, contract).await;
+    assert!(error.contains("output schema"), "{error}");
+}
+
+#[tokio::test]
+async fn session_creation_rejects_references_under_const_and_enum_nodes() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reference = serde_json::json!({"$ref": format!("http://127.0.0.1:{port}/s.json")});
+    let draft = serde_json::json!({"$schema": "http://json-schema.org/draft-04/schema#"});
+
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    for decision in [
+        serde_json::json!({"const": "HALT", "properties": {"x": reference.clone()}}),
+        serde_json::json!({"enum": ["PROCEED", "HALT"], "properties": {"x": reference.clone()}}),
+        serde_json::json!({"const": "HALT", "items": draft.clone()}),
+        serde_json::json!({"enum": ["PROCEED", "HALT"], "items": draft.clone()}),
+    ] {
+        let mut contract = test_contract();
+        contract.output_schema = serde_json::json!({
+            "type": "object",
+            "properties": { "decision": decision },
+            "required": ["decision"],
+            "additionalProperties": false
+        });
+        let error = assert_contract_rejected_at_creation(&client, &base, contract).await;
+        assert!(error.contains("output schema"), "{decision}: {error}");
+    }
+    assert!(
+        matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "no connection may reach the listener"
+    );
+}
+
+/// Run a session whose provider returns `provider_text`; return the parsed
+/// output response and the raw response body.
+async fn run_with_provider_text(
+    output_schema: serde_json::Value,
+    provider_text: &str,
+) -> (SessionOutputResponse, String) {
+    let mock_url = start_mock_provider(provider_text).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+    let mut contract = test_contract();
+    contract.output_schema = output_schema;
+    let session = create_session(&client, &base, contract).await;
+    let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
+    let raw = client
+        .get(format!("{base}/sessions/{}/output", session.session_id))
+        .bearer_auth(&session.read_token)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    (output, raw)
+}
+
+/// The delivered output is the canonical form, and the receipt hashes it.
+fn assert_delivered_canonical(output: &SessionOutputResponse, raw: &str, expected: &str) {
+    assert_eq!(output.state, tee_relay::session::SessionState::Completed);
+    let delivered = output.output.as_ref().expect("output");
+    let canonical = receipt_core::canonicalize_v3(delivered).unwrap();
+    assert_eq!(canonical, expected);
+    assert!(raw.contains(expected), "delivered body: {raw}");
+    let receipt = output.receipt.as_ref().expect("receipt");
+    assert_eq!(
+        receipt.commitments.output_hash,
+        hex::encode(Sha256::digest(expected.as_bytes()))
+    );
+    assert_eq!(receipt.commitments.output.as_ref(), Some(delivered));
+}
+
+#[tokio::test]
+async fn integer_spellings_are_delivered_in_canonical_form() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "v": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "integer", "minimum": 0, "maximum": 0}
+            }
+        },
+        "required": ["v"],
+        "additionalProperties": false
+    });
+    let (output, raw) = run_with_provider_text(schema, r#"{"v":[0,0.0,-0.0,0e5]}"#).await;
+    assert_delivered_canonical(&output, &raw, r#"{"v":[0,0,0,0]}"#);
+}
+
+#[tokio::test]
+async fn enum_number_spellings_are_delivered_in_canonical_form() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"n": {"enum": [1, 2]}},
+        "required": ["n"],
+        "additionalProperties": false
+    });
+    let (output, raw) = run_with_provider_text(schema, r#"{"n":1.0}"#).await;
+    assert_delivered_canonical(&output, &raw, r#"{"n":1}"#);
+}
+
+#[tokio::test]
+async fn const_number_spellings_are_delivered_in_canonical_form() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"c": {"const": 0}},
+        "required": ["c"],
+        "additionalProperties": false
+    });
+    let (output, raw) = run_with_provider_text(schema, r#"{"c":-0.0}"#).await;
+    assert_delivered_canonical(&output, &raw, r#"{"c":0}"#);
 }

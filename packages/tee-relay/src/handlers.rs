@@ -14,6 +14,7 @@ use uuid::Uuid;
 use tee_core::crypto::{build_aad, decrypt_payload};
 use tee_core::types::ParticipantRole;
 
+use crate::error::RelayError;
 use crate::relay::{self, AppState};
 use crate::session::{Session, SessionState, SessionStore};
 use crate::types::*;
@@ -47,26 +48,32 @@ pub async fn tee_info(State(state): State<Arc<RelayState>>) -> Json<TeeInfoRespo
 }
 
 /// POST /sessions — create a new relay session with per-session ECDH keypair.
+///
+/// The contract is checked here, before any input is submitted: shape and
+/// contract hash, then everything tee-relay must support to run it (prompt
+/// template, relay key pin, model profile, output schema, entropy budget).
+/// An unsupported contract is rejected with 400 and no session is created.
 pub async fn create_session(
     State(state): State<Arc<RelayState>>,
     Json(req): Json<CreateSessionRequest>,
-) -> Result<Json<CreateSessionResponse>, StatusCode> {
+) -> Result<Json<CreateSessionResponse>, RelayError> {
+    // Validate the contract as received and compute its contract hash v2
+    let accepted = relay::accept_contract(&req.contract)?;
+    relay::validate_contract_support(&accepted.contract, &state.app)?;
+    let contract_hash_hex = accepted.contract_hash;
+
     let (pubkey, secret) = state.app.cvm.derive_session_keypair().map_err(|e| {
         tracing::error!("session keypair derivation failed: {e}"); // SAFETY: no plaintext
-        StatusCode::INTERNAL_SERVER_ERROR
+        RelayError::Internal("session keypair derivation failed".to_string())
     })?;
 
     let session_uuid = Uuid::new_v4();
     let session_id = session_uuid.to_string();
     let session_id_bytes: [u8; 16] = *session_uuid.as_bytes();
 
-    // Validate the contract as received and compute its contract hash v2
-    let accepted = relay::accept_contract(&req.contract).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let contract_hash_hex = accepted.contract_hash;
-
     let contract_hash_bytes = hex::decode(&contract_hash_hex).map_err(|e| {
         tracing::error!("contract hash hex decode failed: {e}"); // SAFETY: no plaintext
-        StatusCode::INTERNAL_SERVER_ERROR
+        RelayError::Internal("contract hash decode failed".to_string())
     })?;
 
     let initiator_submit_token = random_token();
@@ -88,7 +95,7 @@ pub async fn create_session(
     state
         .sessions
         .insert(session_id.clone(), session)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| RelayError::Internal("session store unavailable".to_string()))?;
 
     Ok(Json(CreateSessionResponse {
         session_id,
@@ -363,6 +370,7 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
             // Log only the error variant, not the full message (may contain plaintext fragments)
             tracing::warn!(session_id = %session_id, error_kind = %e.kind(), "inference failed"); // SAFETY: no plaintext
             // Build failure receipt
+            let (status, signal_class) = relay::failure_status(&e);
             let failure_receipt = relay::build_failure_receipt_v3(
                 &session_id,
                 &contract_hash_hex,
@@ -370,7 +378,8 @@ async fn run_inference(state: Arc<RelayState>, session_id: String) {
                 input_commitments,
                 Some(&init_ct_hash),
                 Some(&resp_ct_hash),
-                "inference_error",
+                status,
+                signal_class,
                 &state.app,
             )
             .await;

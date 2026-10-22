@@ -227,13 +227,37 @@ pub struct RelayResult {
     pub receipt: ReceiptV3,
 }
 
-/// Validate JSON output against a JSON Schema.
+/// JSON Schema draft used to validate output against a contract's output schema.
+///
+/// The draft is fixed rather than taken from the schema's `$schema` keyword,
+/// so a schema cannot change what its keywords mean (for example, `const` is
+/// not a draft-04 keyword). The strict inline schema bound in
+/// [`crate::schema_acceptance`] assumes this draft.
+pub const OUTPUT_SCHEMA_DRAFT: jsonschema::Draft = jsonschema::Draft::Draft7;
+
+/// Compile a contract output schema for validation under [`OUTPUT_SCHEMA_DRAFT`].
+pub fn compile_output_schema(
+    schema: &serde_json::Value,
+) -> Result<jsonschema::Validator, RelayError> {
+    jsonschema::options()
+        .with_draft(OUTPUT_SCHEMA_DRAFT)
+        .should_validate_formats(true)
+        .build(schema)
+        .map_err(|e| RelayError::OutputValidation(format!("schema compilation: {e}")))
+}
+
+/// Validate JSON output against a JSON Schema (draft 7).
+///
+/// Only called from `relay_core` after `validate_contract_support`, so every
+/// schema validated here has passed the strict check, which visits every
+/// subschema (no `$schema`, `$ref` or composition at any depth); tee-relay
+/// has no registry path. jsonschema is built without its HTTP and file
+/// resolvers, so a reference could not be fetched in any case.
 fn validate_output_schema(
     output: &serde_json::Value,
     schema: &serde_json::Value,
 ) -> Result<(), RelayError> {
-    let validator = jsonschema::validator_for(schema)
-        .map_err(|e| RelayError::OutputValidation(format!("schema compilation: {e}")))?;
+    let validator = compile_output_schema(schema)?;
 
     if !validator.is_valid(output) {
         let errors: Vec<String> = validator
@@ -245,6 +269,48 @@ fn validate_output_schema(
     Ok(())
 }
 
+/// Largest integer exactly representable in an f64 (2^53 - 1).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Rewrite integral numbers written as floats (`1.0`, `-0.0`, `0e5`) as
+/// integers, recursively, within +/-(2^53-1).
+///
+/// A model can otherwise choose among several spellings of the same value
+/// that JSON Schema accepts as an `integer`, or as equal to an `enum`/`const`
+/// member, adding output entropy the schema bound does not count.
+pub fn normalize_integral_numbers(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Number(n) if !n.is_i64() && !n.is_u64() => match n.as_f64() {
+            Some(f) if f.fract() == 0.0 && f.abs() <= MAX_SAFE_INTEGER => {
+                serde_json::Value::from(f as i64)
+            }
+            _ => serde_json::Value::Number(n),
+        },
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(normalize_integral_numbers).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, normalize_integral_numbers(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// The output in canonical form (RFC 8785, receipt v3 profile), re-parsed
+/// from the canonical bytes, and `hex(SHA-256)` of those bytes.
+pub fn canonical_output(
+    output: &serde_json::Value,
+) -> Result<(serde_json::Value, String), RelayError> {
+    let canonical = receipt_core::canonicalize_v3(output)
+        .map_err(|e| RelayError::OutputValidation(format!("output canonicalization: {e}")))?;
+    let hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+    let value = serde_json::from_str(&canonical)
+        .map_err(|e| RelayError::Internal(format!("canonical output: {e}")))?;
+    Ok((value, hash))
+}
+
 /// `hex(SHA-256(JCS(value)))` with the receipt v3 canonicalisation profile
 /// (RFC 8785, numbers limited to +/-(2^53-1)).
 pub fn hash_json_v3(value: &serde_json::Value) -> Result<String, RelayError> {
@@ -252,9 +318,15 @@ pub fn hash_json_v3(value: &serde_json::Value) -> Result<String, RelayError> {
         .map_err(|e| RelayError::Internal(format!("canonicalization: {e}")))
 }
 
-// Returns the canonical inline schema hash so validation and receipt binding
-// share the same preflight result.
-fn validate_contract_support(
+/// Check that tee-relay supports a contract: two participants, the inline
+/// prompt template, the relay key pin, an accepted output schema within the
+/// contract's entropy budget, and no field tee-relay does not enforce
+/// (timing class, model profile or constraints, enforcement policy, session
+/// or invite TTL).
+///
+/// Runs at `POST /sessions`, before any input is submitted, and again before
+/// inference. Returns the schema hash for receipt binding.
+pub fn validate_contract_support(
     contract: &vault_family_types::Contract,
     state: &AppState,
 ) -> Result<String, RelayError> {
@@ -279,28 +351,60 @@ fn validate_contract_support(
         }
     }
 
-    if contract.model_profile_id.is_some() || contract.model_profile_hash.is_some() {
-        return Err(RelayError::ContractValidation(
-            "model_profile_id/model_profile_hash are not supported by tee-relay".to_string(),
-        ));
+    // Every contract field is either enforced here or rejected. The
+    // destructuring has no `..`, so a new contract field fails to compile
+    // until it is classified.
+    let vault_family_types::Contract {
+        // Used in the prompt.
+        purpose_code: _,
+        // Label in the prompt.
+        output_schema_id: _,
+        // Strict inline schema, checked below and enforced on output.
+        output_schema: _,
+        // Exactly two distinct participants, checked above and at accept.
+        participants: _,
+        // Inline prompt program only, checked above.
+        prompt_template_hash: _,
+        // Enforced per session against the schema bound, below.
+        entropy_budget_bits: _,
+        // Gate/Strict reject over-budget schemas; Advisory logs. All are
+        // decided at session creation from the schema upper bound.
+        entropy_enforcement: _,
+        // Descriptive only: bound into the contract hash, not interpreted
+        // and not sent to the model.
+        metadata: _,
+        // Must match the inline schema, below.
+        output_schema_hash: _,
+        // Capped at the relay's limit in relay_core.
+        max_completion_tokens: _,
+        // Checked above.
+        relay_verifying_key_hex: _,
+        // Not enforced by tee-relay: rejected.
+        timing_class,
+        model_profile_id,
+        model_profile_hash,
+        enforcement_policy_hash,
+        model_constraints,
+        session_ttl_secs,
+        invite_ttl_secs,
+    } = contract;
+    let unsupported = [
+        ("timing_class", timing_class.is_some()),
+        ("model_profile_id", model_profile_id.is_some()),
+        ("model_profile_hash", model_profile_hash.is_some()),
+        ("enforcement_policy_hash", enforcement_policy_hash.is_some()),
+        ("model_constraints", model_constraints.is_some()),
+        ("session_ttl_secs", session_ttl_secs.is_some()),
+        ("invite_ttl_secs", invite_ttl_secs.is_some()),
+    ];
+    if let Some((field, _)) = unsupported.iter().find(|(_, present)| *present) {
+        return Err(RelayError::ContractValidation(format!(
+            "{field} is not supported by tee-relay"
+        )));
     }
 
-    if contract.model_constraints.is_some() {
-        return Err(RelayError::ContractValidation(
-            "model_constraints are not supported by tee-relay".to_string(),
-        ));
-    }
-
-    let inline_schema_hash = hash_json_v3(&contract.output_schema)?;
-    if let Some(expected_schema_hash) = contract.output_schema_hash.as_deref()
-        && expected_schema_hash != inline_schema_hash
-    {
-        return Err(RelayError::ContractValidation(
-            "output_schema_hash does not match inline output_schema".to_string(),
-        ));
-    }
-
-    Ok(inline_schema_hash)
+    let accepted = crate::schema_acceptance::accept_output_schema(contract)?;
+    Ok(accepted.hash)
 }
 
 /// Core TEE relay logic: validate → assemble → call provider → validate output → build receipt.
@@ -394,14 +498,19 @@ pub async fn relay_core(
         .await?;
     let inference_end = Utc::now();
 
-    // 7. Parse and validate output
+    // 7. Parse, normalise and validate output, then take its canonical form
     let output: serde_json::Value = serde_json::from_str(&provider_response.text)
         .map_err(|e| RelayError::OutputValidation(format!("output is not valid JSON: {e}")))?;
+    let output = normalize_integral_numbers(output);
 
     validate_output_schema(&output, &contract.output_schema)?;
 
+    // The delivered output, the receipt's `output` and `output_hash` all use
+    // the canonical (RFC 8785) form, so the number spelling chosen by the
+    // model cannot carry information beyond what the schema allows.
+    let (output, output_hash) = canonical_output(&output)?;
+
     // 8. Build TEE receipt
-    let output_hash = hash_json_v3(&output)?;
     let receipt = build_tee_receipt_v3(
         session_id,
         contract_hash_hex,
@@ -573,6 +682,19 @@ async fn build_tee_receipt_v3(
         .map_err(|e| RelayError::ReceiptSigning(format!("v3 signing failed: {e}")))
 }
 
+/// Receipt `(status, signal_class)` for a session that failed with `error`.
+///
+/// Output that the provider produced but the schema rejected is `rejected`,
+/// as in the Selkey relay; other failures are `error`.
+pub fn failure_status(error: &RelayError) -> (SessionStatus, &'static str) {
+    match error {
+        RelayError::OutputValidation(_) => (SessionStatus::Rejected, "schema_validation_failed"),
+        RelayError::Provider(_) => (SessionStatus::Error, "provider_error"),
+        RelayError::ContractValidation(_) => (SessionStatus::Error, "contract_validation_failed"),
+        _ => (SessionStatus::Error, "inference_error"),
+    }
+}
+
 /// Build a v3 failure receipt for an aborted TEE session.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_failure_receipt_v3(
@@ -582,6 +704,7 @@ pub async fn build_failure_receipt_v3(
     input_commitments: Vec<InputCommitmentV3>,
     initiator_submission_hash: Option<&str>,
     responder_submission_hash: Option<&str>,
+    status: SessionStatus,
     signal_class: &str,
     state: &AppState,
 ) -> Result<ReceiptV3, RelayError> {
@@ -661,7 +784,7 @@ pub async fn build_failure_receipt_v3(
             provider_latency_ms: None,
             token_usage: None,
             relay_software_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            status: Some(SessionStatus::Error),
+            status: Some(status),
             signal_class: Some(signal_class.to_string()),
             execution_lane: Some(ExecutionLaneV2::Tee),
             channel_capacity_bits_upper_bound: None,
@@ -724,6 +847,110 @@ mod tests {
         let err = super::parse_decrypted_input(&serde_json::to_vec(&plaintext).unwrap())
             .expect_err("uppercase nonce is rejected");
         assert!(!err.to_string().contains(&nonce));
+    }
+
+    fn const_schema_declaring(draft_uri: &str) -> serde_json::Value {
+        serde_json::json!({
+            "$schema": draft_uri,
+            "type": "object",
+            "properties": { "signal": { "const": "OK" } },
+            "required": ["signal"],
+            "additionalProperties": false
+        })
+    }
+
+    #[test]
+    fn output_validation_enforces_const_whatever_draft_is_declared() {
+        for draft_uri in [
+            "http://json-schema.org/draft-04/schema#",
+            "http://json-schema.org/draft-06/schema#",
+            "http://json-schema.org/draft-07/schema#",
+            "https://json-schema.org/draft/2020-12/schema",
+        ] {
+            let schema = const_schema_declaring(draft_uri);
+            assert!(
+                super::validate_output_schema(&serde_json::json!({"signal": "OK"}), &schema)
+                    .is_ok(),
+                "{draft_uri}: matching const must validate"
+            );
+            for output in [
+                serde_json::json!({"signal": "free text that is not the constant"}),
+                serde_json::json!({"signal": {"nested": [1, 2, 3]}}),
+            ] {
+                assert!(
+                    super::validate_output_schema(&output, &schema).is_err(),
+                    "{draft_uri}: output {output} must fail const"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn output_validation_checks_format_whatever_draft_is_declared() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": { "day": { "type": "string", "maxLength": 10, "format": "date" } },
+            "required": ["day"],
+            "additionalProperties": false
+        });
+        assert!(
+            super::validate_output_schema(&serde_json::json!({"day": "2026-10-22"}), &schema)
+                .is_ok()
+        );
+        assert!(
+            super::validate_output_schema(&serde_json::json!({"day": "free text"}), &schema)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn output_schema_compilation_does_not_fetch_remote_references() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for target in [
+            format!("http://127.0.0.1:{port}/s.json"),
+            "file:///etc/hosts".to_string(),
+        ] {
+            let schema = serde_json::json!({
+                "type": "object",
+                "properties": { "x": { "$ref": target } },
+                "required": ["x"],
+                "additionalProperties": false
+            });
+            assert!(
+                super::compile_output_schema(&schema).is_err(),
+                "{target}: reference must not resolve"
+            );
+        }
+        assert!(
+            matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "no connection may reach the listener"
+        );
+    }
+
+    #[test]
+    fn integral_numbers_are_normalised() {
+        let input: serde_json::Value =
+            serde_json::from_str(r#"{"a":[0,0.0,-0.0,0e5,1.0,1.5,-3.0],"b":{"c":2E1}}"#).unwrap();
+        let out = super::normalize_integral_numbers(input);
+        assert_eq!(
+            serde_json::to_string(&out).unwrap(),
+            r#"{"a":[0,0,0,0,1,1.5,-3],"b":{"c":20}}"#
+        );
+    }
+
+    #[test]
+    fn canonical_output_hash_is_over_the_canonical_bytes() {
+        let value = serde_json::json!({"b": 1, "a": "x"});
+        let (canonical, hash) = super::canonical_output(&value).unwrap();
+        assert_eq!(
+            serde_json::to_string(&canonical).unwrap(),
+            r#"{"a":"x","b":1}"#
+        );
+        assert_eq!(hash, hex::encode(Sha256::digest(br#"{"a":"x","b":1}"#)));
+        assert_eq!(hash, super::hash_json_v3(&value).unwrap());
     }
 
     #[test]
