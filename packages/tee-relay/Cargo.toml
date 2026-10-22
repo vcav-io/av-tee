@@ -13,8 +13,8 @@ tee-snp = { path = "../tee-snp", optional = true }
 tee-transcript = { path = "../tee-transcript" }
 
 # VFC types
-receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "eb991eb" }
-vault-family-types = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "eb991eb" }
+receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "8db99ef8a3de1ca7d72182b9bf833bab480324e9" }
+vault-family-types = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "8db99ef8a3de1ca7d72182b9bf833bab480324e9" }
 
 # Web framework
 axum = "0.8"
@@ -50,6 +50,7 @@ default = []
 snp = ["dep:tee-snp"]
 
 [dev-dependencies]
+verifier-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "8db99ef8a3de1ca7d72182b9bf833bab480324e9" }
 reqwest = { version = "0.12", features = ["json"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
