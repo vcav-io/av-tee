@@ -78,15 +78,23 @@ it as `receipt`. In the TEE lane:
   `contract.participants` order. A participant checks its own entry with its nonce and context.
 - `contract_hash` is contract hash v2 (`SHA256_JCS_V2`), computed from the contract JSON as
   received at `POST /sessions`. Contracts with unknown members are rejected.
-- `POST /sessions` also checks, before any input is submitted, that the relay can run the
-  contract: the inline prompt template, `relay_verifying_key_hex` (if set) equal to the relay's
-  key, no model profile or model constraints, and the output schema. tee-relay has no schema
-  registry, so it accepts only strict inline schemas (the Selkey relay's inline rules: closed
-  objects, every property required, bounded strings, arrays and integers) and computes their
-  entropy upper bound itself. With `entropy_budget_bits` set and enforcement `Gate` (default) or
-  `Strict`, a schema whose bound exceeds the budget is rejected; `Advisory` only logs. The budget
-  applies per session; there is no cross-session ledger. A rejected contract gets `400` and no
-  session.
+- `POST /sessions` also checks, before any input is submitted, that the relay enforces every
+  field the contract sets. A rejected contract gets `400` and no session. What is enforced:
+  - `output_schema`: strict inline schemas only (tee-relay has no schema registry): closed
+    objects with every property required, strings bounded by `enum` or `maxLength`, arrays by
+    `maxItems`, integers by `minimum`/`maximum`; no `$schema`, `$ref` or composition. Output is
+    validated as JSON Schema draft 7, and `output_schema_hash`, if set, must match.
+  - `entropy_budget_bits` / `entropy_enforcement`: the relay computes the schema's entropy upper
+    bound from its structure. With `Gate` (default) or `Strict`, a bound above the budget is
+    rejected; `Advisory` only logs. Per session only; nothing accumulates across sessions.
+  - `prompt_template_hash` must be the inline prompt program; `relay_verifying_key_hex`, if
+    set, must be this relay's key; `participants` must be two distinct names;
+    `max_completion_tokens` is capped at the relay's limit.
+  - `purpose_code` and `output_schema_id` go into the prompt. `metadata` is descriptive only:
+    bound into the contract hash, not interpreted and not sent to the model.
+  - Rejected (not enforced by tee-relay): `timing_class`, `enforcement_policy_hash`,
+    `model_profile_id`, `model_profile_hash`, `model_constraints`, `session_ttl_secs` and
+    `invite_ttl_secs`. Session lifetime is the relay-wide `SELKEY_SESSION_TTL_SECS`.
 - Output that the schema rejects gets a failure receipt with status `rejected` and
   `signal_class` `schema_validation_failed`; provider failures get `error` / `provider_error`.
 - `initiator_submission_hash` and `responder_submission_hash` are SHA-256 hashes of the

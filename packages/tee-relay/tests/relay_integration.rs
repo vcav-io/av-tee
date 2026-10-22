@@ -1371,3 +1371,73 @@ async fn provider_failure_gets_an_error_receipt() {
         Some("provider_error")
     );
 }
+
+#[tokio::test]
+async fn session_creation_rejects_contract_fields_the_tee_lane_does_not_enforce() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    type Edit = Box<dyn Fn(&mut vault_family_types::Contract)>;
+    let cases: Vec<(&str, Edit)> = vec![
+        (
+            "timing_class",
+            Box::new(|c| c.timing_class = Some("fixed".into())),
+        ),
+        (
+            "enforcement_policy_hash",
+            Box::new(|c| c.enforcement_policy_hash = Some("ab".repeat(32))),
+        ),
+        (
+            "session_ttl_secs",
+            Box::new(|c| c.session_ttl_secs = Some(60)),
+        ),
+        (
+            "invite_ttl_secs",
+            Box::new(|c| c.invite_ttl_secs = Some(60)),
+        ),
+    ];
+    for (field, edit) in cases {
+        let mut contract = test_contract();
+        edit(&mut contract);
+        let error = assert_contract_rejected_at_creation(&client, &base, contract).await;
+        assert!(error.contains(field), "{field}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn session_creation_accepts_descriptive_metadata_and_supported_fields() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.metadata = serde_json::json!({"scenario": "test", "version": "1"});
+    contract.max_completion_tokens = Some(256);
+    contract.entropy_budget_bits = Some(8);
+    contract.entropy_enforcement = Some(vault_family_types::EntropyEnforcementMode::Strict);
+    create_session(&client, &base, contract).await;
+}
+
+#[tokio::test]
+async fn session_creation_rejects_a_ref_to_a_subschema_declaring_another_draft() {
+    let mock_url = start_mock_provider(r#"{"decision":"HALT"}"#).await;
+    let base = start_relay_server(&mock_url).await;
+    let client = reqwest::Client::new();
+
+    let mut contract = test_contract();
+    contract.output_schema = serde_json::json!({
+        "type": "object",
+        "properties": { "decision": { "$ref": "#/definitions/fixed" } },
+        "required": ["decision"],
+        "additionalProperties": false,
+        "definitions": {
+            "fixed": {
+                "$schema": "http://json-schema.org/draft-04/schema#",
+                "const": "OK"
+            }
+        }
+    });
+    let error = assert_contract_rejected_at_creation(&client, &base, contract).await;
+    assert!(error.contains("output schema"), "{error}");
+}

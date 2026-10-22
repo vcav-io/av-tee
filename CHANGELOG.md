@@ -12,6 +12,11 @@
     upper bound is computed from the schema, ignoring self-declared bounds.
   - The contract entropy budget is enforced per session (`Gate`/`Strict` reject, `Advisory`
     logs).
+  - Contracts setting fields tee-relay doesn't enforce are rejected: `timing_class`,
+    `enforcement_policy_hash`, `model_profile_id`/`model_profile_hash`, `model_constraints`,
+    `session_ttl_secs`, `invite_ttl_secs`. `metadata` is accepted as descriptive only.
+  - Output is validated as JSON Schema draft 7 (with formats) regardless of `$schema`, and
+    strict inline schemas may not carry `$schema`.
   - Failure receipts for schema-rejected output have status `rejected` and `signal_class`
     `schema_validation_failed` (was `error` / `inference_error`); provider failures are
     `provider_error`.

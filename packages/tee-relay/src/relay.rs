@@ -247,6 +247,10 @@ pub fn compile_output_schema(
 }
 
 /// Validate JSON output against a JSON Schema (draft 7).
+///
+/// Only called from `relay_core` after `validate_contract_support`, so every
+/// schema validated here has passed the strict check (no `$schema`, `$ref`
+/// or composition); tee-relay has no registry path.
 fn validate_output_schema(
     output: &serde_json::Value,
     schema: &serde_json::Value,
@@ -271,8 +275,10 @@ pub fn hash_json_v3(value: &serde_json::Value) -> Result<String, RelayError> {
 }
 
 /// Check that tee-relay supports a contract: two participants, the inline
-/// prompt template, the relay key pin, no model profile or constraints, and
-/// an accepted output schema within the contract's entropy budget.
+/// prompt template, the relay key pin, an accepted output schema within the
+/// contract's entropy budget, and no field tee-relay does not enforce
+/// (timing class, model profile or constraints, enforcement policy, session
+/// or invite TTL).
 ///
 /// Runs at `POST /sessions`, before any input is submitted, and again before
 /// inference. Returns the schema hash for receipt binding.
@@ -301,16 +307,56 @@ pub fn validate_contract_support(
         }
     }
 
-    if contract.model_profile_id.is_some() || contract.model_profile_hash.is_some() {
-        return Err(RelayError::ContractValidation(
-            "model_profile_id/model_profile_hash are not supported by tee-relay".to_string(),
-        ));
-    }
-
-    if contract.model_constraints.is_some() {
-        return Err(RelayError::ContractValidation(
-            "model_constraints are not supported by tee-relay".to_string(),
-        ));
+    // Every contract field is either enforced here or rejected. The
+    // destructuring has no `..`, so a new contract field fails to compile
+    // until it is classified.
+    let vault_family_types::Contract {
+        // Used in the prompt.
+        purpose_code: _,
+        // Label in the prompt.
+        output_schema_id: _,
+        // Strict inline schema, checked below and enforced on output.
+        output_schema: _,
+        // Exactly two distinct participants, checked above and at accept.
+        participants: _,
+        // Inline prompt program only, checked above.
+        prompt_template_hash: _,
+        // Enforced per session against the schema bound, below.
+        entropy_budget_bits: _,
+        // Gate/Strict reject over-budget schemas; Advisory logs. All are
+        // decided at session creation from the schema upper bound.
+        entropy_enforcement: _,
+        // Descriptive only: bound into the contract hash, not interpreted
+        // and not sent to the model.
+        metadata: _,
+        // Must match the inline schema, below.
+        output_schema_hash: _,
+        // Capped at the relay's limit in relay_core.
+        max_completion_tokens: _,
+        // Checked above.
+        relay_verifying_key_hex: _,
+        // Not enforced by tee-relay: rejected.
+        timing_class,
+        model_profile_id,
+        model_profile_hash,
+        enforcement_policy_hash,
+        model_constraints,
+        session_ttl_secs,
+        invite_ttl_secs,
+    } = contract;
+    let unsupported = [
+        ("timing_class", timing_class.is_some()),
+        ("model_profile_id", model_profile_id.is_some()),
+        ("model_profile_hash", model_profile_hash.is_some()),
+        ("enforcement_policy_hash", enforcement_policy_hash.is_some()),
+        ("model_constraints", model_constraints.is_some()),
+        ("session_ttl_secs", session_ttl_secs.is_some()),
+        ("invite_ttl_secs", invite_ttl_secs.is_some()),
+    ];
+    if let Some((field, _)) = unsupported.iter().find(|(_, present)| *present) {
+        return Err(RelayError::ContractValidation(format!(
+            "{field} is not supported by tee-relay"
+        )));
     }
 
     let accepted = crate::schema_acceptance::accept_output_schema(contract)?;
