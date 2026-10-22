@@ -206,7 +206,7 @@ pub async fn submit_input(
     let echo = build_echo_response(&state, &session_id)
         .await
         .map_err(|e| {
-            tracing::warn!(session_id = %session_id, error = ?e, "echo response failed");
+            tracing::warn!(session_id = %session_id, error = ?e, "echo response failed"); // SAFETY: no plaintext (EchoError holds static strs + attestation device error)
             reject()
         })?;
     Ok((StatusCode::OK, Json(echo)).into_response())
