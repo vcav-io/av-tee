@@ -10,21 +10,96 @@ use tee_relay::handlers::{self, RelayState};
 use tee_relay::relay::AppState;
 use tee_relay::session::{SessionStore, start_session_reaper};
 
-fn build_cvm_runtime() -> Result<Arc<dyn CvmRuntime>, Box<dyn std::error::Error>> {
+/// Exit with a startup error. The message never contains secrets.
+fn exit_startup(message: &str) -> ! {
+    tracing::error!("{message}"); // SAFETY: no plaintext
+    std::process::exit(1);
+}
+
+/// Open the CVM runtime: SEV-SNP when built with `snp` and the device works;
+/// the simulated runtime only with `SELKEY_ALLOW_SIMULATED=1`.
+fn build_cvm_runtime() -> Result<Arc<dyn CvmRuntime>, String> {
+    use tee_relay::startup::{HardwareRuntime, RuntimeChoice, choose_runtime};
+
     #[cfg(feature = "snp")]
-    {
-        match tee_snp::SevSnpCvm::new() {
-            Ok(cvm) => {
-                tracing::info!("SEV-SNP CVM runtime initialized");
-                return Ok(Arc::new(cvm));
-            }
-            Err(e) => {
-                tracing::warn!("SEV-SNP unavailable ({e}), falling back to simulated");
-            }
+    let (hardware, snp_cvm) = match tee_snp::SevSnpCvm::new() {
+        Ok(cvm) => (HardwareRuntime::Available, Some(cvm)),
+        Err(e) => (HardwareRuntime::Failed(e.to_string()), None),
+    };
+    #[cfg(not(feature = "snp"))]
+    let hardware = HardwareRuntime::NotBuilt;
+
+    if let HardwareRuntime::Failed(reason) = &hardware {
+        tracing::error!("SEV-SNP initialisation failed: {reason}"); // SAFETY: no plaintext
+    }
+    let allow_simulated = tee_relay::startup::allow_simulated(
+        std::env::var(tee_relay::startup::ALLOW_SIMULATED_ENV)
+            .ok()
+            .as_deref(),
+    );
+    match choose_runtime(hardware, allow_simulated)? {
+        #[cfg(feature = "snp")]
+        RuntimeChoice::SevSnp => {
+            tracing::info!("SEV-SNP CVM runtime initialized"); // SAFETY: no plaintext
+            let cvm = snp_cvm.ok_or("SEV-SNP runtime missing after initialisation")?;
+            Ok(Arc::new(cvm))
+        }
+        #[cfg(not(feature = "snp"))]
+        RuntimeChoice::SevSnp => Err("SEV-SNP runtime selected in a build without it".into()),
+        RuntimeChoice::Simulated => {
+            warn!(
+                "Using the SIMULATED CVM runtime ({}=1): no hardware isolation, receipts are SELF_ASSERTED", // SAFETY: no plaintext
+                tee_relay::startup::ALLOW_SIMULATED_ENV
+            );
+            Ok(Arc::new(tee_core::SimulatedCvm::new()))
         }
     }
-    tracing::info!("Using simulated CVM runtime");
-    Ok(Arc::new(tee_core::SimulatedCvm::new()))
+}
+
+/// Resolve the listen socket address from SELKEY_BIND_ADDR and SELKEY_PORT.
+fn bind_socket_addr() -> std::net::SocketAddr {
+    let ip =
+        tee_relay::startup::resolve_bind_addr(std::env::var("SELKEY_BIND_ADDR").ok().as_deref())
+            .unwrap_or_else(|e| exit_startup(&format!("{e}; refusing to start")));
+    let port: u16 = match std::env::var("SELKEY_PORT") {
+        Ok(v) => v.parse().unwrap_or_else(|e| {
+            tracing::warn!("SELKEY_PORT invalid ({v}: {e}), using default 3100");
+            3100
+        }),
+        Err(_) => 3100,
+    };
+    std::net::SocketAddr::new(ip, port)
+}
+
+/// Load or generate the sealed receipt signing key.
+async fn load_sealed_signing_key(cvm: &dyn CvmRuntime) -> ed25519_dalek::SigningKey {
+    use tee_relay::key_lifecycle::{KeySource, UnsealFailurePolicy, load_signing_key};
+
+    let data_dir =
+        std::env::var("SELKEY_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/selkey-tee".to_string()); // SAFETY: no plaintext
+    let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
+    let policy =
+        UnsealFailurePolicy::from_env_value(std::env::var("SELKEY_SEAL_STRICT").ok().as_deref());
+    let loaded = load_signing_key(cvm, &sealed_path, policy)
+        .await
+        .unwrap_or_else(|e| exit_startup(&format!("failed to load the sealed signing key: {e}")));
+    let pubkey_hex = hex::encode(loaded.signing_key.verifying_key().as_bytes());
+    match &loaded.source {
+        KeySource::Generated => {
+            tracing::info!(receipt_signing_pubkey_hex = %pubkey_hex, "generated and sealed a new receipt signing key"); // SAFETY: no plaintext
+        }
+        KeySource::Unsealed => {
+            tracing::info!(receipt_signing_pubkey_hex = %pubkey_hex, "unsealed the receipt signing key"); // SAFETY: no plaintext
+        }
+        KeySource::Regenerated { rejected_blob } => {
+            tracing::error!(
+                rejected_blob = %rejected_blob.display(),
+                receipt_signing_pubkey_hex = %pubkey_hex,
+                "the sealed signing key could not be unsealed by this CVM; it was moved aside and a NEW receipt signing key was generated. Clients pinning the previous key must re-pin" // SAFETY: no plaintext
+            );
+        }
+    }
+    loaded.signing_key
 }
 
 #[tokio::main]
@@ -49,22 +124,17 @@ async fn main() {
         .unwrap_or(false);
 
     // CVM no longer depends on signing key — construct it once
-    let cvm = build_cvm_runtime().expect("failed to initialize CVM runtime");
+    let cvm = build_cvm_runtime().unwrap_or_else(|e| exit_startup(&e));
 
     // Resolve signing key: env var override (dev only, blocked in real TEE) or seal/unseal lifecycle
     let signing_key = if cvm.is_real_tee() {
         if std::env::var("SELKEY_SIGNING_KEY_HEX").is_ok() {
-            panic!(
-                "SELKEY_SIGNING_KEY_HEX must not be set in real TEE mode — use seal/unseal lifecycle"
+            exit_startup(
+                "SELKEY_SIGNING_KEY_HEX must not be set in real TEE mode — use seal/unseal lifecycle",
             );
         }
-        let data_dir =
-            std::env::var("SELKEY_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/selkey-tee".to_string()); // SAFETY: no plaintext
-        let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
         tracing::info!("Using seal/unseal key lifecycle (real TEE)"); // SAFETY: no plaintext
-        tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
-            .await
-            .expect("failed to load/generate sealed signing key")
+        load_sealed_signing_key(cvm.as_ref()).await
     } else {
         match std::env::var("SELKEY_SIGNING_KEY_HEX") {
             Ok(hex_str) if hex_str != "0".repeat(64) => {
@@ -77,13 +147,8 @@ async fn main() {
                 ed25519_dalek::SigningKey::from_bytes(&seed)
             }
             _ => {
-                let data_dir = std::env::var("SELKEY_TEE_DATA_DIR")
-                    .unwrap_or_else(|_| "/tmp/selkey-tee".to_string()); // SAFETY: no plaintext
-                let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
                 tracing::info!("Using seal/unseal key lifecycle"); // SAFETY: no plaintext
-                tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
-                    .await
-                    .expect("failed to load/generate sealed signing key")
+                load_sealed_signing_key(cvm.as_ref()).await
             }
         }
     };
@@ -99,8 +164,7 @@ async fn main() {
 async fn run_echo_mode(cvm: Arc<dyn CvmRuntime>, signing_pubkey_hex: &str) {
     use tee_relay::echo::{self, EchoState};
 
-    warn!("ECHO MODE — NOT FOR PRODUCTION. Binds to 127.0.0.1 only."); // SAFETY: no plaintext
-    warn!("This relay uses SimulatedCvm with assurance_level: SelfAsserted."); // SAFETY: no plaintext
+    warn!("ECHO MODE — NOT FOR PRODUCTION."); // SAFETY: no plaintext
 
     let state = Arc::new(EchoState {
         cvm,
@@ -114,15 +178,21 @@ async fn run_echo_mode(cvm: Arc<dyn CvmRuntime>, signing_pubkey_hex: &str) {
         .route("/sessions/{id}/input", post(echo::submit_input))
         .with_state(state);
 
-    let bind = "127.0.0.1:3100";
-    let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
+    let bind = bind_socket_addr();
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .unwrap_or_else(|e| exit_startup(&format!("failed to bind {bind}: {e}")));
     tracing::info!("tee-relay echo listening on {bind}"); // SAFETY: no plaintext
     axum::serve(listener, app).await.unwrap();
 }
 
 async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::SigningKey) {
-    warn!("TEE RELAY MODE — SimulatedCvm (not production-secure)."); // SAFETY: no plaintext
-    warn!("Phase 1: attestable receipts but no client-side verification tooling yet."); // SAFETY: no plaintext
+    if !cvm.is_real_tee() {
+        warn!("TEE RELAY MODE — SimulatedCvm (not production-secure)."); // SAFETY: no plaintext
+    }
+    warn!(
+        "Prototype: attestable receipts; clients must verify attestation before relying on them."
+    ); // SAFETY: no plaintext
 
     let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
     if anthropic_api_key.is_none() {
@@ -168,14 +238,7 @@ async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::Si
         sessions,
     });
 
-    let port: u16 = match std::env::var("SELKEY_PORT") {
-        Ok(v) => v.parse().unwrap_or_else(|e| {
-            tracing::warn!("SELKEY_PORT invalid ({v}: {e}), using default 3100");
-            3100
-        }),
-        Err(_) => 3100,
-    };
-    let bind = format!("127.0.0.1:{port}");
+    let bind = bind_socket_addr();
 
     let app = Router::new()
         .route("/tee/info", get(handlers::tee_info))
@@ -185,7 +248,9 @@ async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::Si
         .route("/sessions/{id}/output", get(handlers::session_output))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .unwrap_or_else(|e| exit_startup(&format!("failed to bind {bind}: {e}")));
     tracing::info!("tee-relay listening on {bind}"); // SAFETY: no plaintext
     axum::serve(listener, app).await.unwrap();
 }

@@ -13,6 +13,13 @@ pub enum CvmError {
     AttestationUnavailable(String),
     #[error("seal/unseal failed: {0}")]
     SealError(String),
+    /// The sealed blob cannot be opened by this CVM under its current key
+    /// policy: unknown format or policy, or authentication failed (for
+    /// example a blob sealed by an older version, a different platform or a
+    /// different launch). Retrying will not help; the sealed data must be
+    /// regenerated. Platform or device failures use other variants.
+    #[error("sealed blob rejected: {0}")]
+    SealedBlobRejected(String),
 }
 
 /// Abstraction over TEE CVM capabilities.
@@ -160,13 +167,13 @@ impl CvmRuntime for SimulatedCvm {
         use aes_gcm::{Aes256Gcm, Nonce};
 
         if !sealed.starts_with(SEAL_VERSION_PREFIX) {
-            return Err(CvmError::SealError(
+            return Err(CvmError::SealedBlobRejected(
                 "sealed blob missing version prefix (expected av-tee-seal-v1)".into(),
             ));
         }
         let rest = &sealed[SEAL_VERSION_PREFIX.len()..];
         if rest.len() < 12 {
-            return Err(CvmError::SealError(
+            return Err(CvmError::SealedBlobRejected(
                 "sealed blob too short for nonce".into(),
             ));
         }
@@ -177,7 +184,7 @@ impl CvmRuntime for SimulatedCvm {
             .map_err(|e| CvmError::SealError(e.to_string()))?;
         cipher
             .decrypt(nonce, ciphertext)
-            .map_err(|e| CvmError::SealError(e.to_string()))
+            .map_err(|e| CvmError::SealedBlobRejected(e.to_string()))
     }
 
     fn is_real_tee(&self) -> bool {

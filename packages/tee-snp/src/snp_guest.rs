@@ -101,24 +101,94 @@ pub(crate) fn parse_report_bytes(report_bytes: &[u8]) -> Result<ParsedReport, Cv
     })
 }
 
-/// Derive a 32-byte sealing key from the AMD Secure Processor.
-///
-/// Policy: VCEK root key, VMPL 0, measurement-only field selection.
-#[cfg(target_os = "linux")]
-pub(crate) fn derive_seal_key(fw: &mut Firmware) -> Result<Zeroizing<[u8; 32]>, CvmError> {
-    let mut gfs = GuestFieldSelect::default();
-    gfs.set_measurement(true);
+// GUEST_FIELD_SELECT bits (SNP ABI, MSG_KEY_REQ).
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const FIELD_GUEST_POLICY: u64 = 1 << 0;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const FIELD_MEASUREMENT: u64 = 1 << 3;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const FIELD_TCB_VERSION: u64 = 1 << 5;
 
-    let request = DerivedKey::new(
-        false, // root_key_select: false = VCEK
-        gfs, 0,    // vmpl
-        0,    // guest_svn
-        0,    // tcb_version
+/// Offset of COMMITTED_TCB (8 bytes) in the attestation report.
+#[cfg(any(target_os = "linux", test))]
+const SNP_COMMITTED_TCB_OFFSET: usize = 0x1E0;
+
+/// Parameters of the sealing key derivation request.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SealKeyRequest {
+    /// Root key: `false` selects the VCEK (chip-unique).
+    pub root_key_vmrk: bool,
+    /// GUEST_FIELD_SELECT bits mixed into the key.
+    pub field_select: u64,
+    pub vmpl: u32,
+    pub guest_svn: u32,
+    /// TCB version mixed into the key (the TCB floor). The firmware refuses
+    /// a value above the platform's committed TCB.
+    pub tcb_version: u64,
+}
+
+/// Sealing key policy 0x02: VCEK root, VMPL 0, and the guest policy, the
+/// launch measurement and the TCB floor mixed into the key.
+///
+/// A key sealed under one guest policy (e.g. with DEBUG or MIGRATE_MA
+/// allowed) cannot be derived under another, and the key cannot be derived
+/// on a platform whose committed TCB is below the floor.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn seal_key_request(tcb_floor: u64) -> SealKeyRequest {
+    SealKeyRequest {
+        root_key_vmrk: false,
+        field_select: FIELD_GUEST_POLICY | FIELD_MEASUREMENT | FIELD_TCB_VERSION,
+        vmpl: 0,
+        guest_svn: 0,
+        tcb_version: tcb_floor,
+    }
+}
+
+/// COMMITTED_TCB from a raw attestation report (little-endian u64).
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn parse_committed_tcb(report_bytes: &[u8]) -> Result<u64, CvmError> {
+    let bytes = report_bytes
+        .get(SNP_COMMITTED_TCB_OFFSET..SNP_COMMITTED_TCB_OFFSET + 8)
+        .ok_or_else(|| {
+            CvmError::AttestationUnavailable("report too short for COMMITTED_TCB".into())
+        })?;
+    Ok(u64::from_le_bytes(bytes.try_into().expect("8-byte slice")))
+}
+
+/// Read the platform's committed TCB from a fresh attestation report.
+#[cfg(target_os = "linux")]
+pub(crate) fn committed_tcb(fw: &mut Firmware) -> Result<u64, CvmError> {
+    let report = fw
+        .get_report(None, Some([0u8; 64]), Some(0))
+        .map_err(|e| CvmError::AttestationUnavailable(format!("SNP_GET_REPORT failed: {e}")))?;
+    parse_committed_tcb(&report)
+}
+
+/// Derive a 32-byte sealing key from the AMD Secure Processor.
+#[cfg(target_os = "linux")]
+pub(crate) fn derive_seal_key(
+    fw: &mut Firmware,
+    request: SealKeyRequest,
+) -> Result<Zeroizing<[u8; 32]>, CvmError> {
+    let mut gfs = GuestFieldSelect::default();
+    // Only the fields named in `field_select` are mixed in (image id, family
+    // id and guest SVN are not used).
+    gfs.set_guest_policy(request.field_select & FIELD_GUEST_POLICY != 0);
+    gfs.set_measurement(request.field_select & FIELD_MEASUREMENT != 0);
+    gfs.set_tcb_version(request.field_select & FIELD_TCB_VERSION != 0);
+
+    let derived = DerivedKey::new(
+        request.root_key_vmrk,
+        gfs,
+        request.vmpl,
+        request.guest_svn,
+        request.tcb_version,
         None, // launch_mit_vector
     );
 
     let key = fw
-        .get_derived_key(Some(1), request)
+        .get_derived_key(Some(1), derived)
         .map_err(|e| CvmError::SealError(format!("SNP_GET_DERIVED_KEY failed: {e}")))?;
 
     Ok(Zeroizing::new(key))
@@ -148,6 +218,26 @@ mod tests {
         let mut report = vec![0u8; 1184];
         report[0..4].copy_from_slice(&1u32.to_le_bytes());
         assert!(parse_report_bytes(&report).is_err());
+    }
+
+    #[test]
+    fn seal_key_request_binds_policy_measurement_and_tcb_floor() {
+        let floor = 0x1700_0000_0000_0304;
+        let req = seal_key_request(floor);
+        assert!(!req.root_key_vmrk, "VCEK root key");
+        assert_eq!(req.vmpl, 0);
+        assert_ne!(req.field_select & FIELD_GUEST_POLICY, 0, "guest policy");
+        assert_ne!(req.field_select & FIELD_MEASUREMENT, 0, "measurement");
+        assert_ne!(req.field_select & FIELD_TCB_VERSION, 0, "TCB version");
+        assert_eq!(req.tcb_version, floor);
+    }
+
+    #[test]
+    fn parse_committed_tcb_reads_offset_0x1e0() {
+        let mut report = vec![0u8; 1184];
+        report[0x1E0..0x1E8].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        assert_eq!(parse_committed_tcb(&report).unwrap(), 0x1122_3344_5566_7788);
+        assert!(parse_committed_tcb(&report[..0x1E4]).is_err());
     }
 
     #[test]

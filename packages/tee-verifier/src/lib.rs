@@ -8,7 +8,9 @@ pub mod snp_chain;
 pub mod snp_sig;
 pub mod verify;
 
-pub use allowlist::{MeasurementEntry, StaticAllowlist, TransparencySource};
+pub use allowlist::{
+    AllowlistError, MeasurementEntry, MeasurementPlatform, StaticAllowlist, TransparencySource,
+};
 pub use identity::RelayIdentity;
 pub use quote::{
     QuoteFields, QuoteVerifier, QuoteVerifyError, SevSnpQuoteVerifier, SimulatedQuoteVerifier,
@@ -21,6 +23,6 @@ pub use result::{
 pub use snp_chain::{ProductFamily, TcbPolicy, VerificationConfig};
 pub use tee_transcript::RelayConfig;
 pub use verify::{
-    TeeReceipt, VerifyError, VerifyOptions, verify_tee_receipt, verify_tee_receipt_with_config,
-    verify_tee_receipt_with_options,
+    TeeReceipt, VerifyError, VerifyOptions, verify_tee_receipt, verify_tee_receipt_pinned,
+    verify_tee_receipt_with_config, verify_tee_receipt_with_options,
 };

@@ -12,8 +12,12 @@ IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
 
 echo "Building enclave image: ${IMAGE_NAME}:${IMAGE_TAG}"
 GIT_REV="${SELKEY_TEE_GIT_REV:-$(git rev-parse HEAD)}"
+# CARGO_FEATURES=snp builds the SEV-SNP runtime; empty builds simulated-only.
+CARGO_FEATURES="${CARGO_FEATURES:-}"
+echo "Cargo features: ${CARGO_FEATURES:-<none: simulated-only>}"
 docker build -f Dockerfile.enclave \
   --build-arg "SELKEY_TEE_GIT_REV=${GIT_REV}" \
+  --build-arg "CARGO_FEATURES=${CARGO_FEATURES}" \
   -t "${IMAGE_NAME}:${IMAGE_TAG}" .
 
 # Extract artifact hash (sha256 of the tee-relay binary)
