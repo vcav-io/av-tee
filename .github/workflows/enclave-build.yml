@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: av-tee-relay
+  IMAGE_NAME: selkey-tee-relay
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:

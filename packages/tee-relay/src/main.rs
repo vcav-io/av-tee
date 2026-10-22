@@ -44,7 +44,7 @@ async fn main() {
         )
         .init();
 
-    let echo_mode = std::env::var("AV_TEE_ECHO_MODE")
+    let echo_mode = std::env::var("SELKEY_TEE_ECHO_MODE")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
@@ -53,31 +53,32 @@ async fn main() {
 
     // Resolve signing key: env var override (dev only, blocked in real TEE) or seal/unseal lifecycle
     let signing_key = if cvm.is_real_tee() {
-        if std::env::var("AV_SIGNING_KEY_HEX").is_ok() {
+        if std::env::var("SELKEY_SIGNING_KEY_HEX").is_ok() {
             panic!(
-                "AV_SIGNING_KEY_HEX must not be set in real TEE mode — use seal/unseal lifecycle"
+                "SELKEY_SIGNING_KEY_HEX must not be set in real TEE mode — use seal/unseal lifecycle"
             );
         }
         let data_dir =
-            std::env::var("AV_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/av-tee".to_string()); // SAFETY: no plaintext
+            std::env::var("SELKEY_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/selkey-tee".to_string()); // SAFETY: no plaintext
         let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
         tracing::info!("Using seal/unseal key lifecycle (real TEE)"); // SAFETY: no plaintext
         tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
             .await
             .expect("failed to load/generate sealed signing key")
     } else {
-        match std::env::var("AV_SIGNING_KEY_HEX") {
+        match std::env::var("SELKEY_SIGNING_KEY_HEX") {
             Ok(hex_str) if hex_str != "0".repeat(64) => {
-                warn!("Using AV_SIGNING_KEY_HEX override (dev only)"); // SAFETY: no plaintext
-                let decoded = hex::decode(&hex_str).expect("AV_SIGNING_KEY_HEX is not valid hex");
+                warn!("Using SELKEY_SIGNING_KEY_HEX override (dev only)"); // SAFETY: no plaintext
+                let decoded =
+                    hex::decode(&hex_str).expect("SELKEY_SIGNING_KEY_HEX is not valid hex");
                 let seed: [u8; 32] = decoded
                     .try_into()
-                    .expect("AV_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)");
+                    .expect("SELKEY_SIGNING_KEY_HEX must be exactly 32 bytes (64 hex chars)");
                 ed25519_dalek::SigningKey::from_bytes(&seed)
             }
             _ => {
-                let data_dir =
-                    std::env::var("AV_TEE_DATA_DIR").unwrap_or_else(|_| "/tmp/av-tee".to_string()); // SAFETY: no plaintext
+                let data_dir = std::env::var("SELKEY_TEE_DATA_DIR")
+                    .unwrap_or_else(|_| "/tmp/selkey-tee".to_string()); // SAFETY: no plaintext
                 let sealed_path = std::path::PathBuf::from(data_dir).join("sealed_signing_key");
                 tracing::info!("Using seal/unseal key lifecycle"); // SAFETY: no plaintext
                 tee_relay::key_lifecycle::load_or_generate_signing_key(cvm.as_ref(), &sealed_path)
@@ -128,21 +129,21 @@ async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::Si
         tracing::error!("ANTHROPIC_API_KEY is required in relay mode");
         std::process::exit(1);
     }
-    let anthropic_model_id =
-        std::env::var("AV_MODEL_ID").unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
+    let anthropic_model_id = std::env::var("SELKEY_MODEL_ID")
+        .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".to_string());
     let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
-    let max_completion_tokens: u32 = match std::env::var("AV_MAX_COMPLETION_TOKENS") {
+    let max_completion_tokens: u32 = match std::env::var("SELKEY_MAX_COMPLETION_TOKENS") {
         Ok(v) => v.parse().unwrap_or_else(|e| {
-            tracing::warn!("AV_MAX_COMPLETION_TOKENS invalid ({v}: {e}), using default 4096");
+            tracing::warn!("SELKEY_MAX_COMPLETION_TOKENS invalid ({v}: {e}), using default 4096");
             4096
         }),
         Err(_) => 4096,
     };
     let operator_id =
-        std::env::var("AV_OPERATOR_ID").unwrap_or_else(|_| "av-tee-relay-dev".to_string());
-    let session_ttl: u64 = match std::env::var("AV_SESSION_TTL_SECS") {
+        std::env::var("SELKEY_OPERATOR_ID").unwrap_or_else(|_| "selkey-tee-relay-dev".to_string());
+    let session_ttl: u64 = match std::env::var("SELKEY_SESSION_TTL_SECS") {
         Ok(v) => v.parse().unwrap_or_else(|e| {
-            tracing::warn!("AV_SESSION_TTL_SECS invalid ({v}: {e}), using default 600");
+            tracing::warn!("SELKEY_SESSION_TTL_SECS invalid ({v}: {e}), using default 600");
             600
         }),
         Err(_) => 600,
@@ -166,9 +167,9 @@ async fn run_relay_mode(cvm: Arc<dyn CvmRuntime>, signing_key: ed25519_dalek::Si
         sessions,
     });
 
-    let port: u16 = match std::env::var("AV_PORT") {
+    let port: u16 = match std::env::var("SELKEY_PORT") {
         Ok(v) => v.parse().unwrap_or_else(|e| {
-            tracing::warn!("AV_PORT invalid ({v}: {e}), using default 3100");
+            tracing::warn!("SELKEY_PORT invalid ({v}: {e}), using default 3100");
             3100
         }),
         Err(_) => 3100,

@@ -18,8 +18,8 @@
 
 ```bash
 # Clone at the exact commit
-git clone https://github.com/vcav-io/av-tee.git
-cd av-tee
+git clone https://github.com/vcav-io/selkey-tee.git
+cd selkey-tee
 git checkout <tag-or-commit>
 
 # Build
