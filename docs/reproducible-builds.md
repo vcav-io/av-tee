@@ -34,18 +34,21 @@ bash scripts/build-enclave.sh
 
 ## Allowlist format
 
-The `tee-verifier` crate uses a TOML allowlist mapping known-good measurements
-and artifact hashes to human-readable labels:
+The `tee-verifier` crate uses a TOML allowlist (`StaticAllowlist::from_toml`) mapping
+known-good measurements to the build they came from:
 
 ```toml
 [[entries]]
-measurement = "abc123..."
-artifact_hash = "def456..."
-label = "v1.0.0 release"
+measurement = "<SEV-SNP MEASUREMENT, 96 lowercase hex characters>"
+build_id = "v1.0.0"
+git_rev = "<full git commit>"
+artifact_hash = "<sha256 of the tee-relay binary>"
 ```
 
-The `artifact_hash` field is optional — it provides an additional cross-check
-but is not required for attestation verification.
+`measurement`, `build_id` and `git_rev` are required. `artifact_hash`, `oci_digest`,
+`toolchain` and `timestamp` are optional. `artifact_hash` is recorded for reference: the
+verifier doesn't compare it with anything, because the measurement doesn't cover the
+binary (see above).
 
 ## Key distinction
 

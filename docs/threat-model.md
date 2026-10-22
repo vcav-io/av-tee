@@ -27,7 +27,7 @@ measurement does not identify the relay code that ran.
 | Side-channel attacks | SEV-SNP has known side-channel surface | Platform vendor patches, not application-level |
 | Firmware compromise | CVM trusts AMD PSP firmware | Supply chain trust — out of scope |
 | Denial of service | Operator controls network/compute | Operational, not confidentiality |
-| Metadata leakage | Timing, message sizes, session counts visible | Timing classes (contract field), padding (future) |
+| Metadata leakage | Timing, message sizes, session counts visible | None yet: the contract's `timing_class` is accepted but not enforced, and there is no padding |
 | Relay software bugs | CVM protects memory, not logic | Code review, testing, reproducible builds |
 
 ## Operator blindness
