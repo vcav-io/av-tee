@@ -208,15 +208,17 @@ impl TeeVerificationResult {
         self.attestation_status == AttestationStatus::QuoteSimulated && self.is_valid_sans_quote()
     }
 
-    /// Returns `true` when all receipt-level checks pass, regardless of
-    /// quote verification status. Use when quote verification is unavailable
-    /// or when `QuoteParsed` assurance is sufficient.
+    /// Returns `true` when all receipt-level checks pass and the quote was
+    /// not found invalid (`QuoteParsed`, `QuoteVerified` and `QuoteSimulated`
+    /// are accepted; any `QuoteInvalid` is rejected). Use when platform chain
+    /// verification is unavailable.
     ///
     /// Does NOT guarantee that the execution environment has been
     /// platform-verified. Requires a pinned key
     /// (`SignatureStatus::Valid`).
     pub fn is_valid_sans_quote(&self) -> bool {
-        self.measurement_match.is_some()
+        !matches!(self.attestation_status, AttestationStatus::QuoteInvalid(_))
+            && self.measurement_match.is_some()
             && self.signature_status == SignatureStatus::Valid
             && self.attestation_hash_status == AttestationHashStatus::Valid
             && self.transcript_hash_valid

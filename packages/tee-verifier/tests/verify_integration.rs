@@ -658,7 +658,7 @@ fn removing_the_embedded_key_after_signing_invalidates_the_receipt() {
 }
 
 #[test]
-fn is_valid_sans_quote_ignores_attestation() {
+fn is_valid_sans_quote_rejects_an_invalid_quote() {
     let (receipt, key) = build_receipt(simulated_quote_builder());
     let allowlist = allowlist_with(&simulated_measurement());
 
@@ -672,7 +672,7 @@ fn is_valid_sans_quote_ignores_attestation() {
     ));
     assert!(!result.is_valid());
     assert!(!result.is_valid_parsed());
-    assert!(result.is_valid_sans_quote());
+    assert!(!result.is_valid_sans_quote());
 }
 
 // ---------------------------------------------------------------------------

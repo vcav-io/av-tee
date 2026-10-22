@@ -21,6 +21,9 @@ services:
       # Remove this line for an SEV-SNP build: the relay then refuses to start
       # if SEV-SNP initialisation fails.
       - SELKEY_ALLOW_SIMULATED=1
+      # Relay mode needs a provider key; taken from the host environment.
+      # Echo mode (below) doesn't.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       # Standard relay mode by default. For echo testing:
       # - SELKEY_TEE_ECHO_MODE=true
     # SEV-SNP build (CARGO_FEATURES: "snp"): pass the guest device. The
