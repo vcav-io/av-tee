@@ -73,5 +73,5 @@ curl -s http://localhost:3100/tee/info | jq .receipt_signing_pubkey_hex
 
 Once the new key is confirmed, delete the `.retired` file: verifying old
 receipts needs only the recorded public key, and the retired blob can still be unsealed
-by the same measurement (with the simulated runtime it is effectively the plaintext key).
+by a guest with the same measurement and policy (with the simulated runtime it is effectively the plaintext key).
 Delete it promptly after a suspected compromise.

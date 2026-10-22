@@ -142,7 +142,7 @@ cannot make the relay fetch or read anything. Output numbers are normalised (int
 floats become integers) before validation, and the output is delivered and hashed in canonical
 RFC 8785 form, so alternative spellings of the same value can't widen the channel beyond the
 schema bound. The relay enforces the entropy budget per session only. Accumulating disclosure across
-sessions is tracked client-side (the selkey-mcp entropy ledger), not by tee-relay.
+sessions is not tracked for the TEE lane (clients have no TEE input path yet).
 
 ## Simulated mode caveats
 
