@@ -1246,23 +1246,29 @@ fn v3_receipt_full_verification() {
     );
     let allowlist = allowlist_with(&simulated_measurement());
 
-    let result = verify_tee_receipt_with_options(
-        &receipt,
-        &allowlist,
-        &SimulatedQuoteVerifier,
-        &options_with(test_relay_config()),
-    )
-    .unwrap();
+    // A v3 transcript is valid whether or not legacy transcripts are allowed.
+    for allow_legacy_transcripts in [false, true] {
+        let result = verify_tee_receipt_with_options(
+            &receipt,
+            &allowlist,
+            &SimulatedQuoteVerifier,
+            &VerifyOptions {
+                allow_legacy_transcripts,
+                ..options_with(test_relay_config())
+            },
+        )
+        .unwrap();
 
-    assert_eq!(
-        result.signature_status,
-        tee_verifier::SignatureStatus::Valid
-    );
-    assert!(result.transcript_hash_valid);
-    assert_eq!(result.transcript_schema, Some(TranscriptSchema::V3));
-    assert_eq!(result.relay_config, Some(test_relay_config()));
-    assert!(result.submission_hashes_present);
-    assert!(result.is_valid_simulated());
+        assert_eq!(
+            result.signature_status,
+            tee_verifier::SignatureStatus::Valid
+        );
+        assert!(result.transcript_hash_valid);
+        assert_eq!(result.transcript_schema, Some(TranscriptSchema::V3));
+        assert_eq!(result.relay_config, Some(test_relay_config()));
+        assert!(result.submission_hashes_present);
+        assert!(result.is_valid_simulated());
+    }
 }
 
 #[test]
@@ -1402,6 +1408,30 @@ fn legacy_transcript_does_not_verify_when_a_relay_config_is_supplied() {
         assert!(!result.transcript_hash_valid);
         assert!(!result.is_valid_sans_quote());
         assert_eq!(result.relay_config, None);
+    }
+}
+
+#[test]
+fn v1_transcript_does_not_verify_when_a_relay_config_is_supplied() {
+    let (receipt, key) = build_v1_receipt(simulated_quote_builder());
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    for allow_legacy_transcripts in [false, true] {
+        let result = verify_tee_receipt_with_options(
+            &receipt,
+            &allowlist,
+            &SimulatedQuoteVerifier,
+            &VerifyOptions {
+                relay_config: Some(test_relay_config()),
+                pinned_receipt_key: Some(key.verifying_key()),
+                allow_legacy_transcripts,
+                ..VerifyOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.transcript_schema, Some(TranscriptSchema::V1));
+        assert!(!result.transcript_hash_valid);
+        assert!(!result.is_valid_simulated());
     }
 }
 
