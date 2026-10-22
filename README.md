@@ -3,8 +3,9 @@
 The confidential execution lane for [Selkey](https://github.com/vcav-io/selkey). It runs the
 Selkey relay protocol inside an AMD SEV-SNP confidential VM.
 
-**Status: EXPERIMENTAL.** Don't rely on it for production confidentiality yet. See
-[Caveats](#caveats).
+**Status: prototype, not yet secure.** Don't rely on it for confidentiality. The shipped
+container image runs the simulated runtime, which has no hardware isolation, and the SEV-SNP
+measurement doesn't yet cover the relay binary. See [Caveats](#caveats).
 
 ## What it does
 
@@ -16,16 +17,20 @@ The relay runs entirely inside the attested CVM. For each session it computes a 
 - the initiator and responder submission hashes
 - the output hash
 - the receipt signing public key
-- the asserted model identity (provider/model)
+- the model identity (provider/model) as reported by the provider's API
 
-This 64-byte hash goes into the SEV-SNP attestation report's `REPORT_DATA` field, so the
-hardware-signed report covers the whole transcript. See `packages/tee-transcript`.
+On a real SEV-SNP CVM, this 64-byte hash goes into the attestation report's `REPORT_DATA` field,
+so the hardware-signed report covers the transcript. See `packages/tee-transcript`.
+
+Model identity is **provider-reported**: the relay records the model ID returned by the
+provider's API. Nothing binds or verifies which model actually ran.
 
 Receipts from a real SEV-SNP CVM carry assurance level `TEE_ATTESTED`. Receipts from the
 simulated runtime (development and CI), like those from the software lane, carry `SELF_ASSERTED`.
 
-The relay generates its receipt signing key inside the CVM and seals it to the platform, so an
-operator can't inject one. See [docs/key-rotation.md](docs/key-rotation.md).
+On a real SEV-SNP CVM, the relay generates its receipt signing key inside the CVM and seals it
+to the platform, and refuses a signing key supplied through the environment. In the simulated
+runtime it accepts one. See [docs/key-rotation.md](docs/key-rotation.md).
 
 ## Packages
 
@@ -47,6 +52,15 @@ operator can't inject one. See [docs/key-rotation.md](docs/key-rotation.md).
 
 ## Caveats
 
+- **The shipped image runs the simulated runtime.** `Dockerfile.enclave` builds `tee-relay`
+  without the `snp` feature, so the container always uses `SimulatedCvm` and issues
+  `SELF_ASSERTED` receipts. A build with `--features snp` uses SEV-SNP when `/dev/sev-guest` is
+  available, and otherwise logs a warning and falls back to the simulated runtime.
+- **The measurement doesn't cover the relay binary.** There's no measured boot yet. On a
+  typical confidential VM running the relay in Docker (e.g. GCP N2D), the SNP launch
+  measurement most likely covers the guest firmware only, not the kernel, the container image
+  or the relay. So a matching measurement doesn't show which relay code ran. See
+  [docs/reproducible-builds.md](docs/reproducible-builds.md).
 - **Clients don't yet verify attestation before sending inputs.** The relay produces attestable
   receipts, but don't treat it as secure against an active man-in-the-middle until clients
   verify attestation first.

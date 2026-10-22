@@ -9,10 +9,15 @@
 
 ## What's not yet reproducible
 
-- **SNP measurement**: The AMD SEV-SNP `MEASUREMENT` field depends on the full VM image
-  layout, firmware, kernel, and initrd — not just the application binary. Reproducible
-  SNP measurement requires platform-specific tooling (e.g., `sev-snp-measure`) that is
-  not yet integrated.
+- **SNP measurement**: The AMD SEV-SNP `MEASUREMENT` field is the launch measurement of
+  what the hypervisor loads into the guest at launch. It depends on the platform's VM image
+  layout, not on the application binary. There's no measured boot yet, so on GCP N2D with the
+  relay running in Docker it most likely covers the guest firmware only, not the kernel, the
+  container image or the `tee-relay` binary. Reproducing it requires platform-specific tooling
+  (e.g., `sev-snp-measure`) that is not yet integrated.
+
+The reproducible `artifact_hash` therefore isn't bound to the attestation report today: a
+matching measurement doesn't show that this binary ran.
 
 ## How to reproduce
 
@@ -47,5 +52,5 @@ but is not required for attestation verification.
 | Field | Source | Verifiable today? |
 |-------|--------|-------------------|
 | `artifact_hash` | `sha256(binary)` | Yes — reproducible build |
-| `measurement` | SNP `REPORT_DATA` | No — requires `sev-snp-measure` |
-| `user_data` | Transcript hash | Yes — recomputable from receipt |
+| `measurement` | SNP report `MEASUREMENT` (launch measurement) | No — requires `sev-snp-measure`, and doesn't yet cover the relay binary |
+| `user_data` | SNP report `REPORT_DATA` (transcript hash) | Yes — recomputable from receipt |

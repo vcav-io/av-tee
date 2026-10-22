@@ -53,7 +53,8 @@ curl -s http://localhost:3100/tee/info | jq .
 Before using in production:
 
 1. **Real CVM**: Deploy on AMD SEV-SNP or equivalent. `SimulatedCvm` provides
-   no hardware isolation.
+   no hardware isolation. The image built from `Dockerfile.enclave` doesn't enable the
+   `snp` feature, so it always runs `SimulatedCvm`.
 2. **Measurement verification**: Publish measurements via transparency log or
    static allowlist. Verifiers must check measurements.
 3. **Key lifecycle**: The sealed signing key persists across restarts. See

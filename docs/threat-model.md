@@ -5,10 +5,19 @@
 | Threat | Protection | Mechanism |
 |--------|-----------|-----------|
 | Operator reading plaintext | CVM memory encryption | SEV-SNP encrypted VM RAM |
-| Host OS tampering | Attestation + measurement | Code identity bound to attestation report |
+| Host OS tampering | Attestation + measurement | Launch measurement in the attestation report (see note below) |
 | Co-tenant side-loading | VM isolation | CVM is a separate VM with own address space |
-| Binary tampering | Measurement verification | Verifiers check measurement against allowlist |
+| Binary tampering | Measurement verification (not yet effective) | Verifiers check measurement against allowlist; the measurement does not yet cover the relay binary |
 | Key injection by operator | Seal/unseal lifecycle | Signing key generated inside CVM, sealed to platform |
+
+These protections apply only to a real SEV-SNP CVM. The shipped container image runs the
+simulated runtime (see the README).
+
+**Note on measurement coverage:** the SNP launch measurement covers what the hypervisor loads
+at launch. Without measured boot (kernel, initrd, command line and a verified root filesystem),
+it does not cover the relay binary, and on a typical setup running the relay in Docker it most
+likely covers the guest firmware only. Until measured boot is in place, a known-good
+measurement does not identify the relay code that ran.
 
 ## What the CVM does NOT protect
 
@@ -28,7 +37,8 @@ observe session plaintext even though they provision the infrastructure.
 
 **Guarantees (with real CVM):**
 - Operator cannot read RAM (SEV-SNP memory encryption)
-- Operator cannot inject a different binary (measurement verification)
+- Operator cannot inject a different binary: **not guaranteed yet**. The measurement does not
+  cover the relay binary until measured boot is in place (see the note above)
 - Operator cannot inject a signing key (seal/unseal lifecycle)
 - Session keys are per-session ephemeral ECDH (forward secrecy)
 
@@ -40,7 +50,10 @@ observe session plaintext even though they provision the infrastructure.
 **NOT guaranteed:**
 - Operator can observe network traffic metadata (connection times, sizes)
 - Operator can deny service (stop the relay, block network)
-- A compromised relay binary could exfiltrate data (mitigated by measurement)
+- A compromised or substituted relay binary could exfiltrate data (measurement does not yet
+  detect this)
+- Model identity in receipts is provider-reported: the relay records the model ID returned by
+  the provider's API, and nothing verifies which model ran
 
 ## Transcript binding assurance levels
 
