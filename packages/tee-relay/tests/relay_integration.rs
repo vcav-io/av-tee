@@ -59,6 +59,10 @@ async fn start_mock_provider(output_json: &str) -> String {
     format!("http://{addr}")
 }
 
+/// Well-formed commitment nonce (64 lowercase hex characters) for test inputs.
+const TEST_COMMITMENT_NONCE: &str =
+    "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+
 fn test_contract() -> vault_family_types::Contract {
     vault_family_types::Contract {
         purpose_code: vault_family_types::Purpose::Mediation,
@@ -99,7 +103,9 @@ async fn create_session(
 ) -> CreateSessionResponse {
     client
         .post(format!("{base}/sessions"))
-        .json(&CreateSessionRequest { contract })
+        .json(&CreateSessionRequest {
+            contract: serde_json::to_value(contract).unwrap(),
+        })
         .send()
         .await
         .unwrap()
@@ -159,7 +165,7 @@ async fn submit_both_inputs_and_wait_for_abort(
         .try_into()
         .unwrap();
 
-    let init_input = serde_json::json!({"role": "alice", "context": {}});
+    let init_input = serde_json::json!({"role": "alice", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let init_req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -175,7 +181,7 @@ async fn submit_both_inputs_and_wait_for_abort(
         .await
         .unwrap();
 
-    let resp_input = serde_json::json!({"role": "bob", "context": {}});
+    let resp_input = serde_json::json!({"role": "bob", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let resp_req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -255,7 +261,7 @@ async fn full_relay_roundtrip_with_receipt() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -274,7 +280,8 @@ async fn full_relay_roundtrip_with_receipt() {
     // 3. Submit initiator input
     let init_input = serde_json::json!({
         "role": "alice",
-        "context": {"preference": "morning"}
+        "context": {"preference": "morning"},
+        "commitment_nonce": TEST_COMMITMENT_NONCE
     });
     let init_req = encrypt_input(
         &tee_pubkey_bytes,
@@ -296,7 +303,8 @@ async fn full_relay_roundtrip_with_receipt() {
     // 4. Submit responder input
     let resp_input = serde_json::json!({
         "role": "bob",
-        "context": {"preference": "evening"}
+        "context": {"preference": "evening"},
+        "commitment_nonce": TEST_COMMITMENT_NONCE
     });
     let resp_req = encrypt_input(
         &tee_pubkey_bytes,
@@ -356,7 +364,7 @@ async fn full_relay_roundtrip_with_receipt() {
     assert_eq!(output_value["decision"], "PROCEED");
 
     // 7. Verify receipt
-    let receipt = output.receipt_v2.expect("receipt_v2 should be present");
+    let receipt = output.receipt.expect("receipt should be present");
 
     // execution_lane should be "tee"
     assert_eq!(
@@ -422,7 +430,7 @@ async fn relay_duplicate_submission_rejected() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -438,7 +446,7 @@ async fn relay_duplicate_submission_rejected() {
         .try_into()
         .unwrap();
 
-    let input = serde_json::json!({"role": "alice", "context": {}});
+    let input = serde_json::json!({"role": "alice", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let req1 = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -484,7 +492,7 @@ async fn relay_contract_hash_bound_into_session() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -598,7 +606,7 @@ async fn relay_transcript_hash_matches_recomputed() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -614,7 +622,7 @@ async fn relay_transcript_hash_matches_recomputed() {
         .try_into()
         .unwrap();
 
-    let init_input = serde_json::json!({"role": "alice", "context": {"x": 1}});
+    let init_input = serde_json::json!({"role": "alice", "context": {"x": 1}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let (init_req, init_ct_hash) = encrypt_input_with_hash(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -630,7 +638,7 @@ async fn relay_transcript_hash_matches_recomputed() {
         .await
         .unwrap();
 
-    let resp_input = serde_json::json!({"role": "bob", "context": {"x": 2}});
+    let resp_input = serde_json::json!({"role": "bob", "context": {"x": 2}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let (resp_req, resp_ct_hash) = encrypt_input_with_hash(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -649,7 +657,7 @@ async fn relay_transcript_hash_matches_recomputed() {
     let output = poll_until_done(&client, &base, &session.session_id, &session.read_token).await;
     assert_eq!(output.state, tee_relay::session::SessionState::Completed);
 
-    let receipt = output.receipt_v2.expect("receipt_v2");
+    let receipt = output.receipt.expect("receipt");
     let tee_att = receipt.tee_attestation.as_ref().expect("tee_attestation");
     let receipt_transcript_hex = tee_att
         .transcript_hash_hex
@@ -691,7 +699,7 @@ async fn relay_forward_secrecy_unique_session_keys() {
     let s1: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -703,7 +711,7 @@ async fn relay_forward_secrecy_unique_session_keys() {
     let s2: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -727,7 +735,7 @@ async fn relay_failure_receipt_on_provider_error() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -743,7 +751,7 @@ async fn relay_failure_receipt_on_provider_error() {
         .try_into()
         .unwrap();
 
-    let init_input = serde_json::json!({"role": "alice", "context": {}});
+    let init_input = serde_json::json!({"role": "alice", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let init_req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -759,7 +767,7 @@ async fn relay_failure_receipt_on_provider_error() {
         .await
         .unwrap();
 
-    let resp_input = serde_json::json!({"role": "bob", "context": {}});
+    let resp_input = serde_json::json!({"role": "bob", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let resp_req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -780,9 +788,7 @@ async fn relay_failure_receipt_on_provider_error() {
     assert!(output.output.is_none());
 
     // Failure receipt should be present
-    let receipt = output
-        .receipt_v2
-        .expect("failure receipt_v2 should be present");
+    let receipt = output.receipt.expect("failure receipt should be present");
     assert_eq!(
         receipt.claims.status,
         Some(receipt_core::SessionStatus::Error)
@@ -802,8 +808,7 @@ async fn relay_failure_receipt_on_provider_error() {
         "failure receipt schema_hash must not fall back to sha256(empty)"
     );
     // Verify it matches the canonical hash of the test contract's output_schema
-    let canonical =
-        receipt_core::canonicalize_serializable(&test_contract().output_schema).unwrap();
+    let canonical = receipt_core::canonicalize_v3(&test_contract().output_schema).unwrap();
     let expected_hash = hex::encode(Sha256::digest(canonical.as_bytes()));
     assert_eq!(receipt.commitments.schema_hash, expected_hash);
 
@@ -847,7 +852,7 @@ async fn relay_aad_mismatch_rejected() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -865,7 +870,7 @@ async fn relay_aad_mismatch_rejected() {
 
     // Encrypt with WRONG contract hash — AAD mismatch
     let wrong_contract_hash = "ff".repeat(32);
-    let input = serde_json::json!({"role": "alice", "context": {}});
+    let input = serde_json::json!({"role": "alice", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -894,7 +899,7 @@ async fn relay_role_swap_rejected() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -911,7 +916,7 @@ async fn relay_role_swap_rejected() {
         .unwrap();
 
     // Encrypt as initiator but submit as responder — AAD won't match
-    let input = serde_json::json!({"role": "alice", "context": {}});
+    let input = serde_json::json!({"role": "alice", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let client_secret = StaticSecret::random_from_rng(rand::thread_rng());
     let tee_pub = PublicKey::from(tee_pubkey_bytes);
     let session_uuid = uuid::Uuid::parse_str(&session.session_id).unwrap();
@@ -963,7 +968,7 @@ async fn relay_receipt_session_id_matches() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -979,7 +984,7 @@ async fn relay_receipt_session_id_matches() {
         .try_into()
         .unwrap();
 
-    let init_input = serde_json::json!({"role": "alice", "context": {}});
+    let init_input = serde_json::json!({"role": "alice", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let init_req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -995,7 +1000,7 @@ async fn relay_receipt_session_id_matches() {
         .await
         .unwrap();
 
-    let resp_input = serde_json::json!({"role": "bob", "context": {}});
+    let resp_input = serde_json::json!({"role": "bob", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let resp_req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -1012,7 +1017,7 @@ async fn relay_receipt_session_id_matches() {
         .unwrap();
 
     let output = poll_until_done(&client, &base, &session.session_id, &session.read_token).await;
-    let receipt = output.receipt_v2.expect("receipt_v2");
+    let receipt = output.receipt.expect("receipt");
 
     // Receipt session_id must match the actual session
     assert_eq!(receipt.session_id, session.session_id);
@@ -1027,7 +1032,7 @@ async fn relay_status_and_output_require_read_token() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -1060,7 +1065,7 @@ async fn relay_plaintext_role_label_mismatch_aborts_session() {
     let session: CreateSessionResponse = client
         .post(format!("{base}/sessions"))
         .json(&CreateSessionRequest {
-            contract: test_contract(),
+            contract: serde_json::to_value(test_contract()).unwrap(),
         })
         .send()
         .await
@@ -1076,7 +1081,7 @@ async fn relay_plaintext_role_label_mismatch_aborts_session() {
         .try_into()
         .unwrap();
 
-    let mislabeled_init_input = serde_json::json!({"role": "bob", "context": {}});
+    let mislabeled_init_input = serde_json::json!({"role": "bob", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let init_req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -1095,7 +1100,7 @@ async fn relay_plaintext_role_label_mismatch_aborts_session() {
         .unwrap();
     assert_eq!(init_resp.status(), 202);
 
-    let resp_input = serde_json::json!({"role": "bob", "context": {}});
+    let resp_input = serde_json::json!({"role": "bob", "context": {}, "commitment_nonce": TEST_COMMITMENT_NONCE});
     let resp_req = encrypt_input(
         &tee_pubkey_bytes,
         &session.session_id,
@@ -1114,7 +1119,7 @@ async fn relay_plaintext_role_label_mismatch_aborts_session() {
 
     let output = poll_until_done(&client, &base, &session.session_id, &session.read_token).await;
     assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
-    let receipt = output.receipt_v2.expect("failure receipt");
+    let receipt = output.receipt.expect("failure receipt");
     assert_eq!(
         receipt.claims.status,
         Some(receipt_core::SessionStatus::Error)
@@ -1144,7 +1149,7 @@ async fn relay_rejects_mismatched_relay_verifying_key() {
     let output = submit_both_inputs_and_wait_for_abort(&client, &base, &session).await;
 
     assert_eq!(output.state, tee_relay::session::SessionState::Aborted);
-    let receipt = output.receipt_v2.expect("failure receipt");
+    let receipt = output.receipt.expect("failure receipt");
     assert_eq!(
         receipt.claims.status,
         Some(receipt_core::SessionStatus::Error)

@@ -20,7 +20,7 @@ zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
 
 # VFC types (for TeeType re-export)
-receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "eb991eb" }
+receipt-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "734b8854cc826e2f2c6776ffe857f209f467d7b1" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -811,3 +811,166 @@ mod snp_sig_tests {
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Receipt v3
+// ---------------------------------------------------------------------------
+
+/// Build a signed v3 TEE receipt. `attested_key` is the key named in
+/// `tee_attestation` (and bound into the transcript); `signing_key` signs.
+fn build_v3_receipt(
+    quote_builder: QuoteBuilder,
+    signing_key: &SigningKey,
+    attested_key: &ed25519_dalek::VerifyingKey,
+) -> receipt_core::ReceiptV3 {
+    use receipt_core::{
+        BudgetScope, BudgetUsageV3, CANONICALIZATION_V3, ClaimsV3, CommitmentsV3, ContractHashAlg,
+        InputCommitmentScheme, InputCommitmentV3, OperatorV3, SCHEMA_VERSION_V3, UnsignedReceiptV3,
+    };
+
+    let pubkey_hex = hex::encode(attested_key.as_bytes());
+    let contract_hash = hex::encode(Sha256::digest(b"test-contract"));
+    let output = serde_json::json!({"score": 4});
+    let output_hash = hex::encode(Sha256::digest(
+        receipt_core::canonicalize_v3(&output).unwrap().as_bytes(),
+    ));
+    let prompt_template_hash = hex::encode(Sha256::digest(b"test-prompt-template"));
+    let initiator_sub_hash = hex::encode(Sha256::digest(b"test-initiator-ciphertext"));
+    let responder_sub_hash = hex::encode(Sha256::digest(b"test-responder-ciphertext"));
+    let model_identity_asserted = "anthropic/test-model";
+
+    let transcript_hash = compute_transcript_hash_v2(&TranscriptInputsV2 {
+        contract_hash: &contract_hash,
+        prompt_template_hash: &prompt_template_hash,
+        initiator_submission_hash: &initiator_sub_hash,
+        responder_submission_hash: &responder_sub_hash,
+        output_hash: &output_hash,
+        receipt_signing_pubkey_hex: &pubkey_hex,
+        model_identity_asserted,
+    });
+    let (quote_bytes, measurement) = quote_builder(&transcript_hash);
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let commitment = |nonce: u8, ctx: serde_json::Value| {
+        receipt_core::compute_input_commitment_v3(&[nonce; 32], &ctx).unwrap()
+    };
+
+    let unsigned = UnsignedReceiptV3 {
+        receipt_schema_version: SCHEMA_VERSION_V3.to_string(),
+        receipt_canonicalization: CANONICALIZATION_V3.to_string(),
+        receipt_id: "test-receipt-v3".to_string(),
+        session_id: "test-session-v3".to_string(),
+        issued_at: receipt_core::format_issued_at_v3(chrono::Utc::now()),
+        assurance_level: AssuranceLevel::SelfAsserted,
+        operator: OperatorV3 {
+            operator_id: "test-relay".to_string(),
+            operator_key_fingerprint: hex::encode(Sha256::digest(
+                signing_key.verifying_key().as_bytes(),
+            )),
+            operator_key_discovery: None,
+        },
+        commitments: CommitmentsV3 {
+            contract_hash,
+            contract_hash_alg: ContractHashAlg::Sha256JcsV2,
+            schema_hash: hex::encode(Sha256::digest(b"test-schema")),
+            output_hash,
+            input_commitments: vec![
+                InputCommitmentV3 {
+                    participant_id: "alice".to_string(),
+                    input_commitment: commitment(1, serde_json::json!({"a": 1})),
+                    scheme: InputCommitmentScheme::Sha256N32JcsV3,
+                },
+                InputCommitmentV3 {
+                    participant_id: "bob".to_string(),
+                    input_commitment: commitment(2, serde_json::json!({"b": 2})),
+                    scheme: InputCommitmentScheme::Sha256N32JcsV3,
+                },
+            ],
+            prompt_assembly_version: "1.0.0".to_string(),
+            output: Some(output),
+            prompt_template_hash: Some(prompt_template_hash),
+            effective_config_hash: None,
+            preflight_bundle: None,
+            output_retrieval_uri: None,
+            output_media_type: None,
+            preflight_bundle_uri: None,
+            initiator_submission_hash: Some(initiator_sub_hash),
+            responder_submission_hash: Some(responder_sub_hash),
+        },
+        claims: ClaimsV3 {
+            model_identity_asserted: Some(model_identity_asserted.to_string()),
+            model_identity_attested: None,
+            model_profile_hash_asserted: None,
+            runtime_hash_asserted: None,
+            runtime_hash_attested: None,
+            budget_enforcement_mode: None,
+            provider_latency_ms: Some(100),
+            token_usage: None,
+            relay_software_version: Some("0.1.0".to_string()),
+            status: Some(SessionStatus::Success),
+            signal_class: Some("SESSION_COMPLETED".to_string()),
+            execution_lane: Some(ExecutionLaneV2::Tee),
+            channel_capacity_bits_upper_bound: None,
+            channel_capacity_measurement_version: None,
+            entropy_budget_bits: None,
+            schema_entropy_ceiling_bits: None,
+            budget_usage: Some(BudgetUsageV3 {
+                scope: BudgetScope::Session,
+                bits_used_before: 0,
+                bits_used_after: 3,
+                budget_limit: 128,
+            }),
+        },
+        provider_attestation: None,
+        tee_attestation: Some(TeeAttestation {
+            tee_type: Some(TeeType::Simulated),
+            measurement: Some(measurement),
+            quote: Some(b64.encode(&quote_bytes)),
+            attestation_hash: Some(hex::encode(Sha256::digest(&quote_bytes))),
+            receipt_signing_pubkey_hex: Some(pubkey_hex),
+            transcript_hash_hex: Some(hex::encode(transcript_hash)),
+            user_data_hex: Some(hex::encode(transcript_hash)),
+            snp_vcek_cert: None,
+        }),
+    };
+
+    receipt_core::sign_and_assemble_receipt_v3(unsigned, signing_key).unwrap()
+}
+
+#[test]
+fn v3_receipt_full_verification() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_tee_receipt(&receipt, &allowlist, &SimulatedQuoteVerifier).unwrap();
+
+    assert_eq!(
+        result.signature_status,
+        tee_verifier::SignatureStatus::Valid
+    );
+    assert!(result.transcript_hash_valid);
+    assert_eq!(result.transcript_schema, Some(TranscriptSchema::V2));
+    assert!(result.submission_hashes_present);
+    assert!(result.is_valid());
+}
+
+#[test]
+fn v3_receipt_signed_by_a_key_other_than_the_attested_key_is_invalid() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let attested_key = SigningKey::from_bytes(&[8u8; 32]).verifying_key();
+    let receipt = build_v3_receipt(simulated_quote_builder(), &signing_key, &attested_key);
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_tee_receipt(&receipt, &allowlist, &SimulatedQuoteVerifier).unwrap();
+
+    assert_eq!(
+        result.signature_status,
+        tee_verifier::SignatureStatus::Invalid
+    );
+    assert!(!result.is_valid());
+}

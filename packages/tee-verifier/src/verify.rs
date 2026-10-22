@@ -2,7 +2,7 @@ use base64::Engine;
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
-use receipt_core::ReceiptV2;
+use receipt_core::{ReceiptV2, ReceiptV3, TeeAttestation};
 use tee_transcript::{
     TranscriptInputs, TranscriptInputsV2, compute_transcript_hash, compute_transcript_hash_v2,
 };
@@ -23,8 +23,77 @@ pub enum VerifyError {
     SignatureError(String),
 }
 
-pub fn verify_tee_receipt(
-    receipt: &ReceiptV2,
+/// A TEE receipt to verify: v3 (current) or v2 (issued before receipt v3).
+#[derive(Debug, Clone, Copy)]
+pub enum TeeReceipt<'a> {
+    V2(&'a ReceiptV2),
+    V3(&'a ReceiptV3),
+}
+
+impl<'a> From<&'a ReceiptV2> for TeeReceipt<'a> {
+    fn from(receipt: &'a ReceiptV2) -> Self {
+        TeeReceipt::V2(receipt)
+    }
+}
+
+impl<'a> From<&'a ReceiptV3> for TeeReceipt<'a> {
+    fn from(receipt: &'a ReceiptV3) -> Self {
+        TeeReceipt::V3(receipt)
+    }
+}
+
+/// The receipt fields that TEE verification reads, common to v2 and v3.
+struct TeeFields<'a> {
+    tee_attestation: Option<&'a TeeAttestation>,
+    contract_hash: &'a str,
+    prompt_template_hash: Option<&'a str>,
+    initiator_submission_hash: Option<&'a str>,
+    responder_submission_hash: Option<&'a str>,
+    output_hash: &'a str,
+    model_identity_asserted: Option<&'a str>,
+}
+
+impl<'a> TeeReceipt<'a> {
+    fn fields(&self) -> TeeFields<'a> {
+        match *self {
+            TeeReceipt::V2(r) => TeeFields {
+                tee_attestation: r.tee_attestation.as_ref(),
+                contract_hash: &r.commitments.contract_hash,
+                prompt_template_hash: r.commitments.prompt_template_hash.as_deref(),
+                initiator_submission_hash: r.commitments.initiator_submission_hash.as_deref(),
+                responder_submission_hash: r.commitments.responder_submission_hash.as_deref(),
+                output_hash: &r.commitments.output_hash,
+                model_identity_asserted: r.claims.model_identity_asserted.as_deref(),
+            },
+            TeeReceipt::V3(r) => TeeFields {
+                tee_attestation: r.tee_attestation.as_ref(),
+                contract_hash: &r.commitments.contract_hash,
+                prompt_template_hash: r.commitments.prompt_template_hash.as_deref(),
+                initiator_submission_hash: r.commitments.initiator_submission_hash.as_deref(),
+                responder_submission_hash: r.commitments.responder_submission_hash.as_deref(),
+                output_hash: &r.commitments.output_hash,
+                model_identity_asserted: r.claims.model_identity_asserted.as_deref(),
+            },
+        }
+    }
+
+    /// Check the receipt signature with the version's own rules.
+    fn signature_valid(&self, vk: &VerifyingKey) -> bool {
+        match *self {
+            TeeReceipt::V2(r) => {
+                let (unsigned, sig) = r.clone().split();
+                receipt_core::verify_receipt_v2(&unsigned, &sig, vk).is_ok()
+            }
+            TeeReceipt::V3(r) => {
+                let (unsigned, sig) = r.clone().split();
+                receipt_core::verify_receipt_v3(&unsigned, &sig, vk).is_ok()
+            }
+        }
+    }
+}
+
+pub fn verify_tee_receipt<'a>(
+    receipt: impl Into<TeeReceipt<'a>>,
     allowlist: &dyn TransparencySource,
     quote_verifier: &dyn QuoteVerifier,
 ) -> Result<TeeVerificationResult, VerifyError> {
@@ -36,15 +105,16 @@ pub fn verify_tee_receipt(
     )
 }
 
-pub fn verify_tee_receipt_with_config(
-    receipt: &ReceiptV2,
+pub fn verify_tee_receipt_with_config<'a>(
+    receipt: impl Into<TeeReceipt<'a>>,
     allowlist: &dyn TransparencySource,
     quote_verifier: &dyn QuoteVerifier,
     config: &VerificationConfig,
 ) -> Result<TeeVerificationResult, VerifyError> {
-    let tee_att = receipt
+    let receipt = receipt.into();
+    let fields = receipt.fields();
+    let tee_att = fields
         .tee_attestation
-        .as_ref()
         .ok_or(VerifyError::MissingTeeAttestation)?;
 
     // 1. Verify receipt signature using pubkey from tee_attestation
@@ -52,8 +122,7 @@ pub fn verify_tee_receipt_with_config(
         None | Some("") => SignatureStatus::MissingKey,
         Some(pubkey_hex) => match verifying_key_from_hex(pubkey_hex) {
             Ok(vk) => {
-                let (unsigned, sig) = receipt.clone().split();
-                if receipt_core::verify_receipt_v2(&unsigned, &sig, &vk).is_ok() {
+                if receipt.signature_valid(&vk) {
                     SignatureStatus::Valid
                 } else {
                     SignatureStatus::Invalid
@@ -145,24 +214,13 @@ pub fn verify_tee_receipt_with_config(
     // Try v2 first (model identity bound), then fall back to v1 for legacy
     // receipts. The `transcript_schema` field tells callers which schema matched.
     let (transcript_hash_valid, transcript_binding, transcript_schema) = {
-        let commitments = &receipt.commitments;
-        let contract_hash = commitments.contract_hash.as_str();
-        let prompt_template_hash = commitments.prompt_template_hash.as_deref().unwrap_or("");
-        let initiator_sub = commitments
-            .initiator_submission_hash
-            .as_deref()
-            .unwrap_or("");
-        let responder_sub = commitments
-            .responder_submission_hash
-            .as_deref()
-            .unwrap_or("");
-        let output_hash = commitments.output_hash.as_str();
+        let contract_hash = fields.contract_hash;
+        let prompt_template_hash = fields.prompt_template_hash.unwrap_or("");
+        let initiator_sub = fields.initiator_submission_hash.unwrap_or("");
+        let responder_sub = fields.responder_submission_hash.unwrap_or("");
+        let output_hash = fields.output_hash;
         let pubkey_hex = tee_att.receipt_signing_pubkey_hex.as_deref().unwrap_or("");
-        let model_id = receipt
-            .claims
-            .model_identity_asserted
-            .as_deref()
-            .unwrap_or("");
+        let model_id = fields.model_identity_asserted.unwrap_or("");
 
         // V2 hash (includes model_identity_asserted)
         let v2_inputs = TranscriptInputsV2 {
@@ -235,8 +293,8 @@ pub fn verify_tee_receipt_with_config(
     };
 
     // 5. Check submission hashes present
-    let submission_hashes_present = receipt.commitments.initiator_submission_hash.is_some()
-        && receipt.commitments.responder_submission_hash.is_some();
+    let submission_hashes_present =
+        fields.initiator_submission_hash.is_some() && fields.responder_submission_hash.is_some();
 
     Ok(TeeVerificationResult {
         measurement_match,
