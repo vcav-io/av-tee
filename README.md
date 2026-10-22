@@ -52,7 +52,8 @@ verifier labels a v3 match "relay config asserted (not code-attested)", and the 
 a receipt is "genuine GCP SNP VM; relay code not measured". When a relay config is supplied, a
 receipt with a v1 or v2 transcript does not verify (it can't be checked against the config);
 without one, such receipts still verify, labelled "code/config unbound". `ANTHROPIC_BASE_URL`
-must not contain user info, a query or a fragment; the relay refuses to start otherwise.
+must not contain user info, a query or a fragment; the relay refuses to start otherwise. The rest
+of the URL, including its path, is published at `/tee/info`, so it must not carry secrets.
 
 Receipts from a real SEV-SNP CVM carry assurance level `TEE_ATTESTED`. Receipts from the
 simulated runtime (development and CI), like those from the software lane, carry `SELF_ASSERTED`.

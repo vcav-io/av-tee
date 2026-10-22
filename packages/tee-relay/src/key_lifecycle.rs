@@ -11,16 +11,15 @@ use tee_core::attestation::{CvmError, CvmRuntime};
 /// replaces the SEV-SNP sealed key, and the reverse. The simulated runtime
 /// keeps the original name.
 pub fn sealed_key_file_name(tee_type: TeeType) -> String {
+    // Fixed names, independent of how TeeType serialises.
     match tee_type {
-        TeeType::Simulated => "sealed_signing_key".to_string(),
-        other => {
-            let label = serde_json::to_value(other)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_ascii_lowercase))
-                .unwrap_or_else(|| format!("{other:?}").to_ascii_lowercase());
-            format!("sealed_signing_key.{label}")
-        }
+        TeeType::Simulated => "sealed_signing_key",
+        TeeType::SevSnp => "sealed_signing_key.sev-snp",
+        TeeType::TDX => "sealed_signing_key.tdx",
+        TeeType::SGX => "sealed_signing_key.sgx",
+        TeeType::TrustZone => "sealed_signing_key.trustzone",
     }
+    .to_string()
 }
 
 /// What to do when the sealed signing key exists but this CVM rejects it

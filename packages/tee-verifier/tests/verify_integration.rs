@@ -1345,6 +1345,21 @@ fn relay_config_claim_depends_on_what_the_measurement_covers() {
         result.relay_config_claim(),
         Some("relay config asserted (not code-attested)")
     );
+
+    // No claim for a receipt that fails receipt-level checks (here: the
+    // relay key is not pinned).
+    let unpinned = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist_with(&simulated_measurement()),
+        &SimulatedQuoteVerifier,
+        &VerifyOptions {
+            relay_config: Some(test_relay_config()),
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(unpinned.transcript_hash_valid);
+    assert_eq!(unpinned.relay_config_claim(), None);
 }
 
 #[test]
