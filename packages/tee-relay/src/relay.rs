@@ -296,7 +296,7 @@ pub async fn relay_core(
         ));
     }
 
-    // 4. Assemble prompt
+    // 3. Assemble prompt
     let system = format!(
         "You are a structured data mediator for a {} session. \
          Respond with ONLY the JSON object matching the output schema. \
@@ -321,25 +321,16 @@ pub async fn relay_core(
             .map_err(|e| RelayError::PromptAssembly(format!("serialize input_b: {e}")))?,
     );
 
-    // 5. Compute assembled prompt hash
-    // TODO: `assembled_prompt_hash` is being removed from receipt v3 in
-    // vault-family-core. It is still a required field at the pinned revision;
-    // stop computing and emitting it when the pin moves.
-    let assembled_prompt_hash = hash_json_v3(&serde_json::json!({
-        "system": &system,
-        "user_message": &user_message,
-    }))?;
-
-    // 6. Compute prompt template hash (inline prompt program for now)
+    // 4. Compute prompt template hash (inline prompt program for now)
     let prompt_template_hash = { INLINE_PROMPT_TEMPLATE_HASH.to_string() };
 
-    // 7. Resolve effective max_tokens
+    // 5. Resolve effective max_tokens
     let effective_max_tokens = match contract.max_completion_tokens {
         Some(contract_max) => std::cmp::min(contract_max, state.max_completion_tokens),
         None => state.max_completion_tokens,
     };
 
-    // 8. Call provider
+    // 6. Call provider
     let inference_start = Utc::now();
     let api_key = state
         .anthropic_api_key
@@ -362,13 +353,13 @@ pub async fn relay_core(
         .await?;
     let inference_end = Utc::now();
 
-    // 9. Parse and validate output
+    // 7. Parse and validate output
     let output: serde_json::Value = serde_json::from_str(&provider_response.text)
         .map_err(|e| RelayError::OutputValidation(format!("output is not valid JSON: {e}")))?;
 
     validate_output_schema(&output, &contract.output_schema)?;
 
-    // 10. Build TEE receipt
+    // 8. Build TEE receipt
     let output_hash = hash_json_v3(&output)?;
     let receipt = build_tee_receipt_v3(
         session_id,
@@ -377,7 +368,6 @@ pub async fn relay_core(
         &output,
         &output_hash,
         input_commitments,
-        assembled_prompt_hash,
         &prompt_template_hash,
         initiator_ciphertext_hash,
         responder_ciphertext_hash,
@@ -451,7 +441,6 @@ async fn build_tee_receipt_v3(
     output: &serde_json::Value,
     output_hash: &str,
     input_commitments: Vec<InputCommitmentV3>,
-    assembled_prompt_hash: String,
     prompt_template_hash: &str,
     initiator_submission_hash: &str,
     responder_submission_hash: &str,
@@ -525,10 +514,8 @@ async fn build_tee_receipt_v3(
             schema_hash: schema_hash.to_string(),
             output_hash: output_hash.to_string(),
             input_commitments,
-            assembled_prompt_hash,
             prompt_assembly_version: "1.0.0".to_string(),
             output: Some(output.clone()),
-            rejected_output_hash: None,
             prompt_template_hash: Some(prompt_template_hash.to_string()),
             effective_config_hash: None,
             preflight_bundle: None,
@@ -647,10 +634,8 @@ pub async fn build_failure_receipt_v3(
             schema_hash: schema_hash.to_string(),
             output_hash: empty_hash,
             input_commitments,
-            assembled_prompt_hash: hex::encode(Sha256::digest(b"")),
             prompt_assembly_version: "1.0.0".to_string(),
             output: None,
-            rejected_output_hash: None,
             prompt_template_hash: None,
             effective_config_hash: None,
             preflight_bundle: None,

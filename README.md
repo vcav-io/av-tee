@@ -54,6 +54,11 @@ it as `receipt`. In the TEE lane:
   received at `POST /sessions`. Contracts with unknown members are rejected.
 - `initiator_submission_hash` and `responder_submission_hash` are SHA-256 hashes of the
   ciphertexts, and `tee_attestation.receipt_signing_pubkey_hex` is the receipt signing key.
+- Receipts carry no `claims.budget_usage`. The field is optional in v3, and the TEE lane doesn't
+  measure channel capacity, so it makes no budget usage claim.
+- Echo mode (`SELKEY_TEE_ECHO_MODE`) takes the same submission plaintext and returns each
+  party's v3 input commitment (`initiator_input_commitment`, `responder_input_commitment`), so a
+  party can confirm its input was decrypted by checking its own commitment.
 - Verify the signature against a pinned relay key, for example with `verifier-core` from
   vault-family-core. `tee-verifier` checks the TEE-specific fields and accepts v3 and earlier v2
   receipts.
