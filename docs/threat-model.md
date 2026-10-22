@@ -16,7 +16,7 @@ start if SEV-SNP initialisation fails, unless that variable is set (see the READ
 
 The sealed signing key (SEV-SNP) is bound to the guest policy, the launch measurement and a TCB
 floor, so it cannot be unsealed by a guest launched with a different policy or on a platform
-whose TCB was rolled back below the floor. It is still bound to a measurement that doesn't
+whose committed TCB was rolled back below the committed TCB at sealing time. It is still bound to a measurement that doesn't
 cover the relay, so other code in a guest with the same firmware measurement could unseal it.
 
 **Note on measurement coverage:** the SNP launch measurement covers what the hypervisor loads

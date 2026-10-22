@@ -1,7 +1,27 @@
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
+use tee_core::TeeType;
 use tee_core::attestation::{CvmError, CvmRuntime};
+
+/// File name of the sealed signing key for a runtime.
+///
+/// Each runtime has its own file, so a relay that falls back to the
+/// simulated runtime (`SELKEY_ALLOW_SIMULATED=1`) never reads, moves or
+/// replaces the SEV-SNP sealed key, and the reverse. The simulated runtime
+/// keeps the original name.
+pub fn sealed_key_file_name(tee_type: TeeType) -> String {
+    match tee_type {
+        TeeType::Simulated => "sealed_signing_key".to_string(),
+        other => {
+            let label = serde_json::to_value(other)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_ascii_lowercase))
+                .unwrap_or_else(|| format!("{other:?}").to_ascii_lowercase());
+            format!("sealed_signing_key.{label}")
+        }
+    }
+}
 
 /// What to do when the sealed signing key exists but this CVM rejects it
 /// (`CvmError::SealedBlobRejected`: sealed by an older key policy, another

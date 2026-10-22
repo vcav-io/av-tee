@@ -16,9 +16,9 @@
     `127.0.0.1:3100`.
   - **Sealing (breaking for existing SEV-SNP deployments):** seal format `av-tee-seal-v3`, key
     policy `0x02`: the sealing key also binds the guest policy and a TCB floor (the committed TCB
-    at sealing time, recorded in the blob). Keys sealed as `av-tee-seal-v2` cannot be unsealed;
-    on first start the relay moves the old file aside and generates a new receipt signing key
-    (or exits with `SELKEY_SEAL_STRICT=1`). Clients pinning the old key must re-pin. A rejected
+    at sealing time, recorded in the blob). Each runtime has its own sealed key file
+    (`sealed_signing_key.sev-snp`, `sealed_signing_key` for simulated). Keys sealed as
+    `av-tee-seal-v2` are not used; the SEV-SNP runtime generates a new receipt signing key. Clients pinning the old key must re-pin. A rejected
     sealed key no longer stops every restart; platform failures and TCB rollback still stop
     startup.
   - `tee-verifier`: the receipt signature is checked against a pinned relay key

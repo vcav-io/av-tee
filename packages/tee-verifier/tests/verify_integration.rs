@@ -1298,6 +1298,28 @@ fn legacy_transcript_does_not_verify_when_a_relay_config_is_supplied() {
 }
 
 #[test]
+fn relay_config_claim_depends_on_what_the_measurement_covers() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+    );
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist_with(&simulated_measurement()),
+        &SimulatedQuoteVerifier,
+        &options_with(test_relay_config()),
+    )
+    .unwrap();
+    assert!(result.transcript_hash_valid);
+    assert_eq!(
+        result.relay_config_claim(),
+        Some("relay config asserted (not code-attested)")
+    );
+}
+
+#[test]
 fn v3_label_does_not_claim_code_attestation() {
     assert_eq!(
         TranscriptSchema::V3.label(),

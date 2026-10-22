@@ -184,3 +184,47 @@ async fn platform_unseal_failure_is_not_treated_as_a_bad_blob() {
     // The sealed key is untouched: no regeneration on a platform failure.
     assert_eq!(std::fs::read(&sealed_path).unwrap(), original);
 }
+
+#[test]
+fn each_runtime_has_its_own_sealed_key_file() {
+    use tee_core::TeeType;
+    use tee_relay::key_lifecycle::sealed_key_file_name;
+    assert_eq!(
+        sealed_key_file_name(TeeType::Simulated),
+        "sealed_signing_key"
+    );
+    let snp = sealed_key_file_name(TeeType::SevSnp);
+    assert_ne!(snp, sealed_key_file_name(TeeType::Simulated));
+    assert!(snp.starts_with("sealed_signing_key."), "{snp}");
+}
+
+#[tokio::test]
+async fn simulated_fallback_leaves_the_snp_sealed_key_untouched() {
+    use tee_core::TeeType;
+    use tee_core::attestation::CvmRuntime;
+    use tee_relay::key_lifecycle::sealed_key_file_name;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // A sealed key written by the SEV-SNP runtime, which the simulated
+    // runtime cannot open.
+    let snp_path = tmp.path().join(sealed_key_file_name(TeeType::SevSnp));
+    std::fs::write(&snp_path, b"av-tee-seal-v3 sealed by the snp runtime").unwrap();
+
+    let cvm = SimulatedCvm::new();
+    let sim_path = tmp
+        .path()
+        .join(sealed_key_file_name(cvm.identity().tee_type));
+    tee_relay::key_lifecycle::load_or_generate_signing_key(&cvm, &sim_path)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(&snp_path).unwrap(),
+        b"av-tee-seal-v3 sealed by the snp runtime"
+    );
+    let names: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(!names.iter().any(|n| n.contains("rejected")), "{names:?}");
+}

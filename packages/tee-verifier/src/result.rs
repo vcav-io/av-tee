@@ -149,6 +149,37 @@ pub enum TranscriptBinding {
 }
 
 impl TeeVerificationResult {
+    /// What the result supports about the relay configuration and code.
+    ///
+    /// - v3 transcript, chain-verified quote and an allowlist entry whose
+    ///   platform covers the relay code: "relay config bound to measured
+    ///   relay code";
+    /// - other valid v3 transcripts: "relay config asserted (not
+    ///   code-attested)";
+    /// - valid v1/v2 transcripts: "code/config unbound";
+    /// - no valid transcript: `None`.
+    pub fn relay_config_claim(&self) -> Option<&'static str> {
+        if !self.transcript_hash_valid {
+            return None;
+        }
+        match self.transcript_schema {
+            Some(TranscriptSchema::V3) => {
+                let code_measured = self.attestation_status == AttestationStatus::QuoteVerified
+                    && self
+                        .measurement_match
+                        .as_ref()
+                        .is_some_and(|m| m.platform.covers_relay_code());
+                Some(if code_measured {
+                    "relay config bound to measured relay code"
+                } else {
+                    "relay config asserted (not code-attested)"
+                })
+            }
+            Some(_) => Some("code/config unbound"),
+            None => None,
+        }
+    }
+
     /// Returns `true` only when all cryptographic checks pass including
     /// full platform chain verification (`QuoteVerified`).
     pub fn is_valid(&self) -> bool {
