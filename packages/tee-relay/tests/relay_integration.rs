@@ -1557,3 +1557,44 @@ async fn const_number_spellings_are_delivered_in_canonical_form() {
     let (output, raw) = run_with_provider_text(schema, r#"{"c":-0.0}"#).await;
     assert_delivered_canonical(&output, &raw, r#"{"c":0}"#);
 }
+
+/// The `output` member of a session output response body, byte for byte.
+#[derive(serde::Deserialize)]
+struct RawOutputBody<'a> {
+    #[serde(borrow)]
+    output: &'a serde_json::value::RawValue,
+}
+
+/// RFC 8785 orders object keys by UTF-16 code units, which differs from
+/// UTF-8 byte order when keys mix characters at or above U+E000 with
+/// characters outside the Basic Multilingual Plane. The delivered bytes are
+/// the canonical text the receipt's `output_hash` commits to.
+#[tokio::test]
+async fn delivered_output_bytes_use_utf16_key_order() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "\u{FB33}": {"enum": ["a", "b"]},
+            "\u{1F600}": {"enum": ["a", "b"]}
+        },
+        "required": ["\u{FB33}", "\u{1F600}"],
+        "additionalProperties": false
+    });
+    // Provider output in UTF-8 key order (U+FB33 sorts first).
+    let (output, raw) =
+        run_with_provider_text(schema, "{\"\u{FB33}\":\"a\",\"\u{1F600}\":\"b\"}").await;
+    assert_eq!(output.state, tee_relay::session::SessionState::Completed);
+
+    let expected = "{\"\u{1F600}\":\"b\",\"\u{FB33}\":\"a\"}";
+    let delivered = serde_json::from_str::<RawOutputBody>(&raw)
+        .expect("output member")
+        .output
+        .get();
+    assert_eq!(delivered, expected);
+
+    let receipt = output.receipt.as_ref().expect("receipt");
+    assert_eq!(
+        receipt.commitments.output_hash,
+        hex::encode(Sha256::digest(delivered.as_bytes()))
+    );
+}

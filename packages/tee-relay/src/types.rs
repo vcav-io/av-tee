@@ -109,11 +109,39 @@ pub struct SessionStatusResponse {
     pub abort_signal: Option<String>,
 }
 
+/// Serialise released output as its receipt v3 canonical (RFC 8785) text, so
+/// the delivered bytes are exactly the bytes the receipt's `output_hash`
+/// commits to.
+fn serialize_canonical_output<S: serde::Serializer>(
+    value: &serde_json::Value,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::Error;
+    let text = receipt_core::canonicalize_v3(value).map_err(S::Error::custom)?;
+    let raw = serde_json::value::RawValue::from_string(text).map_err(S::Error::custom)?;
+    raw.serialize(serializer)
+}
+
+fn serialize_canonical_output_opt<S: serde::Serializer>(
+    value: &Option<serde_json::Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(v) => serialize_canonical_output(v, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 /// Response from GET /sessions/:id/output.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionOutputResponse {
     pub state: SessionState,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Released output, serialised as its canonical text.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_canonical_output_opt"
+    )]
     pub output: Option<serde_json::Value>,
     /// Signed v3 receipt (success or failure), once the session is terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
