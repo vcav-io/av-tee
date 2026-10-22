@@ -43,13 +43,16 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "1"
 reqwest = { version = "0.12", features = ["json"] }
-jsonschema = "0.28"
+# No resolve-http / resolve-file: a schema reference never causes a fetch
+# or a file read.
+jsonschema = { version = "0.28", default-features = false }
 
 [features]
 default = []
 snp = ["dep:tee-snp"]
 
 [dev-dependencies]
+async-trait = "0.1"
 verifier-core = { git = "https://github.com/vcav-io/vault-family-core.git", rev = "734b8854cc826e2f2c6776ffe857f209f467d7b1" }
 reqwest = { version = "0.12", features = ["json"] }
 tempfile = "3"

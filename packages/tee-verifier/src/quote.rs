@@ -1,3 +1,4 @@
+use receipt_core::TeeType;
 use sha2::{Digest, Sha256};
 
 use crate::result::AttestationStatus;
@@ -26,11 +27,25 @@ pub enum QuoteVerifyError {
     MissingReceiptUserData,
     #[error("receipt has quote but no measurement")]
     MissingReceiptMeasurement,
+    #[error(
+        "receipt tee_type {receipt:?} does not match the quote verifier's platform {verifier:?}"
+    )]
+    TeeTypeMismatch {
+        receipt: Option<TeeType>,
+        verifier: TeeType,
+    },
+    #[error("simulated attestation in a receipt that claims TEE_ATTESTED assurance")]
+    SimulatedClaimsTeeAttested,
+    #[error("SEV-SNP chain verification needs a VerificationConfig with an explicit TCB policy")]
+    TcbPolicyRequired,
 }
 
 /// The level of cryptographic assurance the verifier provides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationLevel {
+    /// Simulated quote: format checked. There is no platform signature, so
+    /// this never counts as platform verification.
+    Simulated,
     /// Fields extracted and format validated, but no platform signature checked.
     Parsed,
     /// Full platform cryptographic chain verified (e.g., VCEK -> ASK -> ARK).
@@ -61,6 +76,11 @@ pub struct VerifiedQuote {
 /// SNP report struct, etc). The caller (`verify_tee_receipt`) is responsible
 /// for cross-checking extracted fields against receipt claims.
 pub trait QuoteVerifier: Send + Sync {
+    /// The platform this verifier handles. A receipt whose
+    /// `tee_attestation.tee_type` differs is rejected before the quote is
+    /// parsed.
+    fn tee_type(&self) -> TeeType;
+
     fn verify_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedQuote, QuoteVerifyError>;
 }
 
@@ -71,14 +91,19 @@ pub trait QuoteVerifier: Send + Sync {
 /// Verifier for simulated TEE quotes produced by `SimulatedCvm`.
 ///
 /// Simulated quotes have format: `b"simulated-quote:" || user_data` (80 bytes).
-/// In simulated mode the format check IS the complete verification — there is
-/// no certificate chain to verify. Returns `VerificationLevel::ChainVerified`.
+/// Anyone can produce one, so a simulated quote shows nothing about the
+/// platform. Returns `VerificationLevel::Simulated`, which maps to
+/// `AttestationStatus::QuoteSimulated` and never to `QuoteVerified`.
 pub struct SimulatedQuoteVerifier;
 
 const SIMULATED_PREFIX: &[u8] = b"simulated-quote:";
 const SIMULATED_QUOTE_LEN: usize = 16 + 64; // prefix + user_data
 
 impl QuoteVerifier for SimulatedQuoteVerifier {
+    fn tee_type(&self) -> TeeType {
+        TeeType::Simulated
+    }
+
     fn verify_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedQuote, QuoteVerifyError> {
         if quote_bytes.len() != SIMULATED_QUOTE_LEN {
             return Err(QuoteVerifyError::WrongLength {
@@ -101,7 +126,7 @@ impl QuoteVerifier for SimulatedQuoteVerifier {
                 user_data,
                 measurement,
             },
-            level: VerificationLevel::ChainVerified,
+            level: VerificationLevel::Simulated,
         })
     }
 }
@@ -110,15 +135,13 @@ impl QuoteVerifier for SimulatedQuoteVerifier {
 // SevSnpQuoteVerifier
 // ---------------------------------------------------------------------------
 
-/// SEV-SNP attestation report verifier.
+/// SEV-SNP attestation report verifier (field extraction).
 ///
-/// Currently supports field extraction (parse-only). Cryptographic chain
-/// verification (VCEK -> ASK -> ARK) is not yet implemented.
-///
-/// TODO(#14): VCEK signature verification
-/// TODO(#14): TCB version checks
-/// TODO(#14): Report signer identity allowlist
-/// TODO(#14): Product/family/stepping checks
+/// Extracts REPORT_DATA and MEASUREMENT from a version 2 to 5 report and
+/// returns `VerificationLevel::Parsed`. `verify_tee_receipt` then verifies
+/// the VCEK → ASK → ARK chain, the report signature, the report policy
+/// (VMPL, MIGRATE_MA, SMT), the TCB and the chip id when the receipt
+/// carries the VCEK (see `snp_chain`).
 pub struct SevSnpQuoteVerifier {
     _private: (), // Force use of constructors
 }
@@ -133,32 +156,22 @@ impl SevSnpQuoteVerifier {
 }
 
 // AMD SEV-SNP attestation report layout (fixed-size C struct per ABI spec).
-const SNP_REPORT_SIZE: usize = 1184;
+#[cfg(test)]
+const SNP_REPORT_SIZE: usize = crate::snp_report::SNP_REPORT_SIZE;
+#[cfg(test)]
 const SNP_VERSION_OFFSET: usize = 0;
 const SNP_REPORT_DATA_OFFSET: usize = 80;
 const SNP_MEASUREMENT_OFFSET: usize = 144;
 const SNP_MEASUREMENT_LEN: usize = 48;
-const SNP_EXPECTED_VERSION: u32 = 2;
 
 impl QuoteVerifier for SevSnpQuoteVerifier {
-    fn verify_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedQuote, QuoteVerifyError> {
-        if quote_bytes.len() != SNP_REPORT_SIZE {
-            return Err(QuoteVerifyError::WrongLength {
-                got: quote_bytes.len(),
-                expected: SNP_REPORT_SIZE,
-            });
-        }
+    fn tee_type(&self) -> TeeType {
+        TeeType::SevSnp
+    }
 
-        let version = u32::from_le_bytes(
-            quote_bytes[SNP_VERSION_OFFSET..SNP_VERSION_OFFSET + 4]
-                .try_into()
-                .unwrap(),
-        );
-        if version != SNP_EXPECTED_VERSION {
-            return Err(QuoteVerifyError::SnpParseFailed(format!(
-                "version {version}, expected {SNP_EXPECTED_VERSION}"
-            )));
-        }
+    fn verify_quote(&self, quote_bytes: &[u8]) -> Result<VerifiedQuote, QuoteVerifyError> {
+        // Size and version (2 to 5) checks.
+        crate::snp_report::parse_report_fields(quote_bytes)?;
 
         let mut user_data = [0u8; 64];
         user_data
@@ -220,6 +233,7 @@ pub(crate) fn cross_check_and_map(
     Ok(match verified.level {
         VerificationLevel::ChainVerified => AttestationStatus::QuoteVerified,
         VerificationLevel::Parsed => AttestationStatus::QuoteParsed,
+        VerificationLevel::Simulated => AttestationStatus::QuoteSimulated,
     })
 }
 
@@ -238,7 +252,7 @@ mod tests {
 
         let result = SimulatedQuoteVerifier.verify_quote(&quote).unwrap();
         assert_eq!(result.fields.user_data, [0x42; 64]);
-        assert_eq!(result.level, VerificationLevel::ChainVerified);
+        assert_eq!(result.level, VerificationLevel::Simulated);
     }
 
     #[test]
@@ -339,6 +353,17 @@ mod tests {
     }
 
     #[test]
+    fn snp_report_versions_3_and_5_are_parsed() {
+        for version in [3, 5] {
+            let report = build_synthetic_snp_report(version, &[0x11; 64], &[0x22; 48]);
+            let result = SevSnpQuoteVerifier::parsing_only()
+                .verify_quote(&report)
+                .unwrap();
+            assert_eq!(result.fields.user_data, [0x11; 64]);
+        }
+    }
+
+    #[test]
     fn snp_extracted_fields_match() {
         let report_data = [0xCC; 64];
         let measurement = [0xDD; 48];
@@ -370,6 +395,32 @@ mod tests {
             cross_check_and_map(&verified, Some(&hex::encode(user_data)), Some(&measurement))
                 .unwrap();
         assert_eq!(result, AttestationStatus::QuoteVerified);
+    }
+
+    #[test]
+    fn cross_check_simulated_level_never_maps_to_verified() {
+        let user_data = [0x42; 64];
+        let measurement = "abc123".to_string();
+        let verified = VerifiedQuote {
+            fields: QuoteFields {
+                user_data,
+                measurement: measurement.clone(),
+            },
+            level: VerificationLevel::Simulated,
+        };
+        let result =
+            cross_check_and_map(&verified, Some(&hex::encode(user_data)), Some(&measurement))
+                .unwrap();
+        assert_eq!(result, AttestationStatus::QuoteSimulated);
+    }
+
+    #[test]
+    fn verifiers_report_their_platform() {
+        assert_eq!(SimulatedQuoteVerifier.tee_type(), TeeType::Simulated);
+        assert_eq!(
+            SevSnpQuoteVerifier::parsing_only().tee_type(),
+            TeeType::SevSnp
+        );
     }
 
     #[test]

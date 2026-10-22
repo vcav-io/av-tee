@@ -1,9 +1,34 @@
 #![forbid(unsafe_code)]
 
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
+
+mod v3;
+
+pub use v3::{
+    RELAY_CONFIG_VERSION, RelayConfig, TRANSCRIPT_VERSION_V3, TranscriptInputsV3,
+    compute_relay_config_hash, compute_transcript_hash_v3,
+};
 
 pub const TRANSCRIPT_VERSION: &str = "av-tee-transcript-v1";
 pub const TRANSCRIPT_VERSION_V2: &str = "av-tee-transcript-v2";
+
+/// Append `len(bytes)` as a big-endian u64, then `bytes`.
+///
+/// Every variable-length value in the v3 encodings is written this way, so
+/// no value can be read as part of a neighbouring field whatever bytes it
+/// contains (quotes, delimiters, NUL, non-ASCII).
+pub(crate) fn push_length_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+pub(crate) fn sha512(bytes: &[u8]) -> [u8; 64] {
+    Sha512::digest(bytes).into()
+}
 
 /// Structured input for transcript hashing.
 ///
@@ -41,6 +66,11 @@ pub struct TranscriptInputsV2<'a> {
 /// SHA-512 of canonical JSON with sorted keys. The `version` field is
 /// prepended to enable versioned upgrades.
 ///
+/// Legacy: values are interpolated without escaping, so inputs that contain
+/// `"` or `,` can produce the same encoding as different inputs. New
+/// receipts use [`compute_transcript_hash_v3`]; this function is kept to
+/// verify receipts issued before it.
+///
 /// Returns the full 64 bytes — maps directly to SEV-SNP's `user_data` field.
 pub fn compute_transcript_hash(inputs: &TranscriptInputs) -> [u8; 64] {
     // Canonical JSON with sorted keys — constructed manually to avoid
@@ -75,6 +105,9 @@ pub fn compute_transcript_hash(inputs: &TranscriptInputs) -> [u8; 64] {
 ///
 /// Same algorithm as v1 (SHA-512 of canonical JSON with sorted keys) but
 /// with an additional field and `TRANSCRIPT_VERSION_V2`.
+///
+/// Legacy: like v1, values are interpolated without escaping. Kept to verify
+/// receipts issued before [`compute_transcript_hash_v3`].
 pub fn compute_transcript_hash_v2(inputs: &TranscriptInputsV2) -> [u8; 64] {
     let canonical = format!(
         concat!(

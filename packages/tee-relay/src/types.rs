@@ -10,6 +10,16 @@ pub struct TeeInfoResponse {
     pub measurement: String,
     pub platform_version: String,
     pub receipt_signing_pubkey_hex: String,
+    /// Transcript version bound into attestations (`av-tee-transcript-v3`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_version: Option<String>,
+    /// Plaintext relay configuration bound into transcript v3. A verifier
+    /// recomputes `relay_config_hash` from it and applies its own policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_config: Option<tee_transcript::RelayConfig>,
+    /// `hex(SHA-256(LP-encoded relay_config))`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_config_hash: Option<String>,
 }
 
 impl TeeInfoResponse {
@@ -22,7 +32,18 @@ impl TeeInfoResponse {
             measurement: id.measurement.clone(),
             platform_version: id.platform_version.clone(),
             receipt_signing_pubkey_hex: pubkey_hex.to_string(),
+            transcript_version: None,
+            relay_config: None,
+            relay_config_hash: None,
         }
+    }
+
+    /// Add the relay configuration bound into transcript v3.
+    pub fn with_relay_config(mut self, config: tee_transcript::RelayConfig) -> Self {
+        self.transcript_version = Some(tee_transcript::TRANSCRIPT_VERSION_V3.to_string());
+        self.relay_config_hash = Some(config.hash_hex());
+        self.relay_config = Some(config);
+        self
     }
 }
 

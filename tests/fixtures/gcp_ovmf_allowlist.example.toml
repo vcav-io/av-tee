@@ -1,0 +1,20 @@
+# Example measurement allowlist for GCP Confidential VMs (SEV-SNP).
+#
+# The measurement values below are PLACEHOLDERS, not real endorsed values.
+# Replace them with the SEV-SNP measurements from Google's signed firmware
+# endorsements, one entry per vCPU count you deploy (the launch measurement
+# depends on the number of vCPUs). See docs/deployment.md, "Measurement
+# allowlist (GCP)".
+#
+# A match on a gcp-snp-ovmf entry supports only this claim: genuine GCP SNP VM
+# running Google-endorsed firmware; relay code not measured.
+
+[[entries]]
+measurement = "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002"
+platform = "gcp-snp-ovmf"
+description = "PLACEHOLDER: Google OVMF endorsement <firmware digest>, 2 vCPUs (n2d-standard-2)"
+
+[[entries]]
+measurement = "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004"
+platform = "gcp-snp-ovmf"
+description = "PLACEHOLDER: Google OVMF endorsement <firmware digest>, 4 vCPUs (n2d-standard-4)"

@@ -10,8 +10,14 @@
 | Binary tampering | Measurement verification (not yet effective) | Verifiers check measurement against allowlist; the measurement does not yet cover the relay binary |
 | Key injection by operator | Seal/unseal lifecycle (not guaranteed yet) | Signing key generated inside CVM, sealed to platform; depends on measured boot covering the relay |
 
-These protections apply only to a real SEV-SNP CVM. The shipped container image runs the
-simulated runtime (see the README).
+These protections apply only to a real SEV-SNP CVM. The default container image has only the
+simulated runtime and starts only with `SELKEY_ALLOW_SIMULATED=1`; an `snp` build refuses to
+start if SEV-SNP initialisation fails, unless that variable is set (see the README).
+
+The sealed signing key (SEV-SNP) is bound to the guest policy, the launch measurement and a TCB
+floor, so it cannot be unsealed by a guest launched with a different policy or on a platform
+whose committed TCB was rolled back below the committed TCB at sealing time. It is still bound to a measurement that doesn't
+cover the relay, so other code in a guest with the same firmware measurement could unseal it.
 
 **Note on measurement coverage:** the SNP launch measurement covers what the hypervisor loads
 at launch. Without measured boot (kernel, initrd, command line and a verified root filesystem),
@@ -27,7 +33,7 @@ measurement does not identify the relay code that ran.
 | Side-channel attacks | SEV-SNP has known side-channel surface | Platform vendor patches, not application-level |
 | Firmware compromise | CVM trusts AMD PSP firmware | Supply chain trust — out of scope |
 | Denial of service | Operator controls network/compute | Operational, not confidentiality |
-| Metadata leakage | Timing, message sizes, session counts visible | None yet: the contract's `timing_class` is accepted but not enforced, and there is no padding |
+| Metadata leakage | Timing, message sizes, session counts visible | None yet: there is no timing or size padding, and contracts that set `timing_class` are rejected rather than enforced |
 | Relay software bugs | CVM protects memory, not logic | Code review, testing, reproducible builds |
 
 ## Operator blindness
@@ -56,34 +62,87 @@ now. Each depends on measured boot covering the relay (see the note above).
 - Model identity in receipts is provider-reported: the relay records the model ID returned by
   the provider's API (or the configured model ID if the provider omits it), and nothing
   verifies which model ran
-- The provider endpoint and model ID are operator configuration and aren't bound into the
-  attestation
+- The provider endpoint, requested model ID and mode flags are bound into the transcript
+  (v3) through `relay_config_hash`, so a verifier can check which configuration the attested
+  transcript was computed with. This doesn't show which code computed it: the measurement on
+  GCP N2D covers Google's firmware, not the relay ("relay code not measured")
 
 ## Transcript binding assurance levels
 
-The verifier recomputes the transcript hash (SHA-512 over canonical JSON of all
-commitments) and compares it to a reference value from the receipt. The
+The verifier recomputes the transcript hash (v3: SHA-512 over a length-prefixed
+encoding of all commitments and the relay configuration hash; v1/v2: SHA-512 over
+an interpolated JSON-like string) and compares it to a reference value from the
+receipt. `transcript_schema` records which version matched: v3 binds a relay
+configuration hash (the caller supplies the configuration, and gets it back to apply
+its own policy); v1 and v2 are labelled "code/config unbound" and don't count as
+valid when the caller supplied a configuration. The relay configuration is
+operator-asserted: on GCP the measurement doesn't cover the relay code, so the
+`relay_config` published at `/tee/info` and bound into the transcript is what the
+relay says it runs with, not an attested fact ("relay config asserted (not
+code-attested)"). The
 `TranscriptBinding` field in `TeeVerificationResult` records *which* reference
 was used, because the assurance levels differ significantly:
 
 | Binding | Source field | Assurance | When it occurs |
 |---------|-------------|-----------|----------------|
-| **UserData** | `tee_attestation.user_data_hex` | Hardware-bound only when the quote was checked by the SEV-SNP quote verifier and its certificate chain verified: the hash is then inside the attestation report, signed by the platform, and shows the report was requested by code in a CVM with this launch measurement (which doesn't yet cover the relay binary). With the simulated runtime the same binding is reached but nothing is hardware-bound. | Whenever `user_data_hex` is present, including the simulated runtime |
-| **TranscriptHashFallback** | `tee_attestation.transcript_hash_hex` | Relay-asserted — the hash is correct but set by the relay software, not bound into the attestation. A compromised relay could substitute a different hash without detection. | Receipts without `user_data_hex` (older relays) |
+| **UserData** | `tee_attestation.user_data_hex` | Depends on `attestation_status`. With `QuoteVerified` (SEV-SNP quote, VCEK chain and report checks passed) the hash is inside the hardware-signed report and shows the report was requested by code in a CVM with this launch measurement (which doesn't yet cover the relay binary). With `QuoteParsed` the report's `REPORT_DATA` matches but its signature wasn't checked. With `QuoteSimulated` nothing is hardware-bound. | Whenever `user_data_hex` is present, including the simulated runtime |
+| **TranscriptHashFallback** | `tee_attestation.transcript_hash_hex` | Relay-asserted: the hash is set by the relay software, not bound into the attestation. Such a receipt never passes an `is_valid*` method, because the quote is then either missing (`MissingQuote`) or lacks `user_data_hex` (`MissingReceiptUserData`). | Receipts without `user_data_hex` (older relays) |
 | **None** | *(neither field present)* | Unverifiable — no reference exists to compare against. | Malformed or very old receipts |
 
 ### Recommendations for callers
 
-- **Production verifiers** should require `TranscriptBinding::UserData` **and** a
-  quote verified by the SEV-SNP quote verifier (not the simulated one); UserData
-  alone does not exclude simulated receipts. Accept
-  `TranscriptHashFallback` only during a migration window when older receipts
-  are still in circulation.
-- **Display/debugging UIs** may show the binding level alongside the
-  `transcript_hash_valid` boolean so operators can triage assurance.
-- `is_valid()` and `is_valid_sans_quote()` check `transcript_hash_valid` but
-  do **not** enforce a minimum binding level — callers must check
-  `transcript_binding` themselves if they need hardware-bound assurance.
+- **Production verifiers** should use `is_valid()`, which requires `QuoteVerified` (the
+  SEV-SNP quote verifier with chain and report checks; never a simulated or parsed-only
+  quote), a pinned key, an allowlisted measurement and a valid transcript. Every result that
+  passes an `is_valid*` method has `UserData` binding, so the binding level alone doesn't
+  distinguish a hardware-signed report from a simulated one: check `attestation_status`.
+- `is_valid_simulated()` accepts `QuoteSimulated` for development and tests only, and
+  `is_valid_sans_quote()` accepts any quote not found invalid (`QuoteParsed`, `QuoteVerified` or
+  `QuoteSimulated`); neither shows that the report was hardware-signed.
+- **Display/debugging UIs** may show `attestation_status`, `transcript_binding` and
+  `relay_config_claim()` so operators can triage assurance.
+
+## Verifier checks
+
+- **Pinned key.** `tee-verifier` checks the receipt signature against the relay key from the
+  caller's configuration (`VerifyOptions::pinned_receipt_key`). The key named in
+  `tee_attestation.receipt_signing_pubkey_hex` must equal it. Without a pinned key the result
+  is `SignatureStatus::ValidUnpinned`, which no `is_valid*` method accepts: a receipt that names
+  its own key only shows that it is internally consistent.
+- **Platform type.** `tee_attestation.tee_type` must match the quote verifier's platform, so a
+  simulated quote can't stand in for an SEV-SNP receipt (or the reverse).
+- **Simulated quotes** are reported as `AttestationStatus::QuoteSimulated`, never as
+  `QuoteVerified`; `is_valid()` and `is_valid_parsed()` reject them, and
+  `is_valid_simulated()` exists for development and tests. A simulated quote in a receipt that
+  claims `TEE_ATTESTED` is rejected.
+- **SEV-SNP report checks** (when the receipt carries the VCEK): VCEK → ASK → ARK chain against
+  the bundled AMD roots; report signature; the report is VCEK-signed (KEY_INFO.SIGNING_KEY = 0,
+  chip key not masked) and not DEBUG; VMPL equals the expected VMPL (default 0); MIGRATE_MA is
+  rejected by default; SMT is accepted by default (GCP N2D runs with SMT) and can be rejected
+  with `ReportPolicy::allow_smt = false`; REPORTED_TCB equals the TCB the VCEK certifies and
+  meets the caller's `TcbPolicy` minimums (there is no default: chain verification needs an
+  explicit policy, set from AMD's current security bulletins); CHIP_ID is present and equals the VCEK hwID; the VCEK and ASK
+  are within their validity windows; and an optional `RevocationCheck` (for example
+  `RevokedSerials` from a verified AMD CRL) is consulted. Nothing is fetched from the network.
+  Only Milan and Genoa are supported.
+- **Measurement allowlist entries** state what they cover (`platform`). A `gcp-snp-ovmf` match
+  supports only "genuine GCP SNP VM running Google-endorsed firmware; relay code not measured".
+
+## Contract checks
+
+`POST /sessions` rejects a contract the relay can't run as specified before any input is
+submitted: an unsupported prompt template, a relay key pin that isn't this relay's key, a
+non-strict output schema (including any `$schema` or `$ref` at any depth, or subschemas under
+`enum`/`const` nodes), a schema whose entropy upper
+bound exceeds the contract's budget (with `Gate` or `Strict` enforcement), or a field tee-relay
+doesn't enforce (`timing_class`, `enforcement_policy_hash`, model profile or constraints,
+session or invite TTL). Output is validated as JSON Schema draft 7 whatever the schema
+declares, and the validator is built without HTTP or file reference resolution, so a schema
+cannot make the relay fetch or read anything. Output numbers are normalised (integral
+floats become integers) before validation, and the output is delivered and hashed in canonical
+RFC 8785 form, so alternative spellings of the same value can't widen the channel beyond the
+schema bound. The relay enforces the entropy budget per session only. Accumulating disclosure across
+sessions is tracked client-side (the selkey-mcp entropy ledger), not by tee-relay.
 
 ## Simulated mode caveats
 

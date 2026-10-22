@@ -5,10 +5,13 @@ pub mod identity;
 pub mod quote;
 pub mod result;
 pub mod snp_chain;
+pub mod snp_report;
 pub mod snp_sig;
 pub mod verify;
 
-pub use allowlist::{MeasurementEntry, StaticAllowlist, TransparencySource};
+pub use allowlist::{
+    AllowlistError, MeasurementEntry, MeasurementPlatform, StaticAllowlist, TransparencySource,
+};
 pub use identity::RelayIdentity;
 pub use quote::{
     QuoteFields, QuoteVerifier, QuoteVerifyError, SevSnpQuoteVerifier, SimulatedQuoteVerifier,
@@ -18,5 +21,12 @@ pub use result::{
     AttestationHashStatus, AttestationStatus, SignatureStatus, TeeVerificationResult,
     TranscriptBinding, TranscriptSchema,
 };
-pub use snp_chain::{ProductFamily, TcbPolicy, VerificationConfig};
-pub use verify::{TeeReceipt, VerifyError, verify_tee_receipt, verify_tee_receipt_with_config};
+pub use snp_chain::{
+    ProductFamily, ReportPolicy, RevocationCheck, RevokedSerials, TcbPolicy, VerificationConfig,
+};
+pub use snp_report::{SnpReportFields, TcbVersion};
+pub use tee_transcript::RelayConfig;
+pub use verify::{
+    TeeReceipt, VerifyError, VerifyOptions, verify_tee_receipt, verify_tee_receipt_pinned,
+    verify_tee_receipt_with_config, verify_tee_receipt_with_options,
+};

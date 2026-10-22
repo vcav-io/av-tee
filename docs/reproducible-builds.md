@@ -35,20 +35,25 @@ bash scripts/build-enclave.sh
 ## Allowlist format
 
 The `tee-verifier` crate uses a TOML allowlist (`StaticAllowlist::from_toml`) mapping
-known-good measurements to the build they came from:
+known-good measurements to what they cover and the build they came from:
 
 ```toml
 [[entries]]
 measurement = "<SEV-SNP MEASUREMENT, 96 lowercase hex characters>"
+platform = "gcp-snp-ovmf"
+description = "Google OVMF endorsement <digest>, 2 vCPUs (n2d-standard-2)"
 build_id = "v1.0.0"
 git_rev = "<full git commit>"
 artifact_hash = "<sha256 of the tee-relay binary>"
 ```
 
-`measurement`, `build_id` and `git_rev` are required. `artifact_hash`, `oci_digest`,
-`toolchain` and `timestamp` are optional. `artifact_hash` is recorded for reference: the
-verifier doesn't compare it with anything, because the measurement doesn't cover the
-binary (see above).
+Only `measurement` is required. `platform` states what the measurement covers
+(`gcp-snp-ovmf`, `snp-direct-boot`, `simulated`; `unspecified` if omitted), and only
+`snp-direct-boot` counts as covering the relay code. `description`, `build_id`, `git_rev`,
+`artifact_hash`, `oci_digest`, `toolchain` and `timestamp` are optional; unknown fields are
+rejected. `artifact_hash` is recorded for reference: the verifier doesn't compare it with
+anything, because the measurement doesn't cover the binary (see above). See
+[deployment.md](deployment.md#measurement-allowlist-gcp) for GCP entries.
 
 ## Key distinction
 

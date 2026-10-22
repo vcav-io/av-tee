@@ -1,17 +1,19 @@
 # selkey-tee
 
 The confidential execution lane for [Selkey](https://github.com/vcav-io/selkey). It is designed to run
-the Selkey relay protocol inside an AMD SEV-SNP confidential VM; today it implements part of
-the protocol and runs simulated by default (see [Known gaps](docs/deployment.md#known-gaps)).
+the Selkey relay protocol inside an AMD SEV-SNP confidential VM. Today it implements the bounded
+session flow (no invites), and the default image runs the simulated runtime (see
+[Known gaps](docs/deployment.md#known-gaps)).
 
-**Status: prototype, not yet secure.** Don't rely on it for confidentiality. The shipped
+**Status: prototype, not yet secure.** Don't rely on it for confidentiality. The default
 container image runs the simulated runtime, which has no hardware isolation, and the SEV-SNP
 measurement doesn't yet cover the relay binary. See [Caveats](#caveats).
 
 ## What it does
 
-The relay is designed to run entirely inside the attested CVM. For each session it computes a transcript hash
-(SHA-512 over canonical JSON) that commits to:
+The relay is designed to run entirely inside the attested CVM. For each session it computes a
+transcript hash (transcript v3, `av-tee-transcript-v3`: SHA-512 over a length-prefixed encoding of
+every field) that commits to:
 
 - the contract hash
 - the prompt template hash
@@ -20,14 +22,40 @@ The relay is designed to run entirely inside the attested CVM. For each session 
 - the receipt signing public key
 - the model identity (provider/model): provider-reported (or the configured model ID if the
   provider omits it)
+- the relay configuration hash (see below)
 
 On a real SEV-SNP CVM, this 64-byte hash goes into the attestation report's `REPORT_DATA` field,
-so the hardware-signed report covers the transcript. See `packages/tee-transcript`.
+so the hardware-signed report covers the transcript. See `packages/tee-transcript` and the golden
+vectors in `tests/fixtures/transcript_v3_golden.json`.
 
 Model identity is **provider-reported**: the relay records the model ID returned by the
 provider's API, or the configured model ID if the provider omits it. Nothing binds or verifies
-which model actually ran. The provider endpoint and model ID are operator configuration and
-aren't bound into the attestation.
+which model actually ran.
+
+### Relay configuration binding
+
+`relay_config_hash` is the SHA-256 of a length-prefixed encoding (`av-tee-relay-config-v1`) of
+the relay's configuration: provider id, provider base URL (`ANTHROPIC_BASE_URL` or the default),
+requested model id, policy lockfile hash and model profile allowlist hash (both empty in
+`tee-relay`, which has neither), the relay's source revision (`SELKEY_TEE_GIT_REV` at build time,
+`unknown` otherwise) and the mode flags (echo, simulated, `SELKEY_ENV`). `GET /tee/info` publishes
+the plaintext `relay_config`, its `relay_config_hash` and the `transcript_version`.
+
+A verifier passes the relay configuration to `tee-verifier` (`VerifyOptions::relay_config`); the
+v3 transcript verifies only if that configuration is the one the relay used. The verifier then
+applies its own policy to the values, for example requiring the provider base URL to be
+`https://api.anthropic.com` and `simulated` to be `false`.
+
+What this shows: which configuration the relay *states* the attested transcript was computed
+with. It doesn't show which relay code computed it, and so it doesn't show that the stated
+configuration is the one in use: on GCP N2D the SNP measurement covers Google's firmware, not
+the relay, so the `relay_config` at `/tee/info` and the bound hash are operator-asserted. The
+verifier labels a v3 match "relay config asserted (not code-attested)", and the honest claim for
+a receipt is "genuine GCP SNP VM; relay code not measured". When a relay config is supplied, a
+receipt with a v1 or v2 transcript does not verify (it can't be checked against the config);
+without one, such receipts still verify, labelled "code/config unbound". `ANTHROPIC_BASE_URL`
+must not contain user info, a query or a fragment; the relay refuses to start otherwise. The rest
+of the URL, including its path, is published at `/tee/info`, so it must not carry secrets.
 
 Receipts from a real SEV-SNP CVM carry assurance level `TEE_ATTESTED`. Receipts from the
 simulated runtime (development and CI), like those from the software lane, carry `SELF_ASSERTED`.
@@ -53,6 +81,31 @@ it as `receipt`. In the TEE lane:
   `contract.participants` order. A participant checks its own entry with its nonce and context.
 - `contract_hash` is contract hash v2 (`SHA256_JCS_V2`), computed from the contract JSON as
   received at `POST /sessions`. Contracts with unknown members are rejected.
+- `POST /sessions` also checks, before any input is submitted, that the relay enforces every
+  field the contract sets. A rejected contract gets `400` and no session. What is enforced:
+  - `output_schema`: strict inline schemas only (tee-relay has no schema registry): closed
+    objects with every property required, strings bounded by `enum` or `maxLength`, arrays by
+    `maxItems`, integers by `minimum`/`maximum`; no `$schema`, `$ref` or composition at any
+    depth, and no subschemas under `enum`/`const` nodes or object/array keywords on nodes of
+    another type. Output is validated as JSON Schema draft 7, and `output_schema_hash`, if set,
+    must match. The validator is built without remote or file reference resolution.
+  - `entropy_budget_bits` / `entropy_enforcement`: the relay computes the schema's entropy upper
+    bound from its structure. With `Gate` (default) or `Strict`, a bound above the budget is
+    rejected; `Advisory` only logs. Per session only; nothing accumulates across sessions.
+  - `prompt_template_hash` must be the inline prompt program; `relay_verifying_key_hex`, if
+    set, must be this relay's key; `participants` must be two distinct names;
+    `max_completion_tokens` is capped at the relay's limit.
+  - `purpose_code` and `output_schema_id` go into the prompt. `metadata` is descriptive only:
+    bound into the contract hash, not interpreted and not sent to the model.
+  - Rejected (not enforced by tee-relay): `timing_class`, `enforcement_policy_hash`,
+    `model_profile_id`, `model_profile_hash`, `model_constraints`, `session_ttl_secs` and
+    `invite_ttl_secs`. Session lifetime is the relay-wide `SELKEY_SESSION_TTL_SECS`.
+- Model output is normalised before validation (integral numbers written as floats, such as
+  `1.0`, `-0.0` or `0e5`, become integers) and delivered in its canonical RFC 8785 form; the
+  receipt's `output` and `output_hash` are over the same canonical bytes. So the spelling of a
+  number can't carry information the schema bound doesn't count.
+- Output that the schema rejects gets a failure receipt with status `rejected` and
+  `signal_class` `schema_validation_failed`; provider failures get `error` / `provider_error`.
 - `initiator_submission_hash` and `responder_submission_hash` are SHA-256 hashes of the
   ciphertexts, and `tee_attestation.receipt_signing_pubkey_hex` is the receipt signing key.
 - Receipts carry no `claims.budget_usage`. The field is optional in v3, and the TEE lane doesn't
@@ -64,7 +117,8 @@ it as `receipt`. In the TEE lane:
   vault-family-core. `tee-verifier` checks the TEE-specific fields and accepts v3 and earlier v2
   receipts.
 
-The transcript hash (above) is unchanged by receipt v3.
+The transcript version is independent of the receipt version: receipt v3 receipts issued
+before transcript v3 carry a v2 transcript, and `tee-verifier` still accepts them.
 
 ## Packages
 
@@ -79,25 +133,28 @@ The transcript hash (above) is unchanged by receipt v3.
 ## Status
 
 - The real SEV-SNP runtime (`tee-snp`) was validated on GCP N2D confidential VMs (AMD Milan),
-  where all 20 tests passed (commits `f89dcd3` and `58b58e7`). Later changes, including binding
-  model identity into the transcript (v2), haven't been re-validated on hardware in this repo's
-  history.
+  where all 20 tests passed (commits `f89dcd3` and `58b58e7`). Later changes, including
+  transcripts v2 and v3, haven't been re-validated on hardware in this repo's history.
 - CI runs on standard runners using the simulated runtime.
 
 ## Caveats
 
-- **The shipped image runs the simulated runtime.** `Dockerfile.enclave` builds `tee-relay`
-  without the `snp` feature, so the container always uses `SimulatedCvm` and issues
-  `SELF_ASSERTED` receipts. A build with `--features snp` uses SEV-SNP when `/dev/sev-guest` is
-  available, and otherwise logs a warning and falls back to the simulated runtime.
+- **The default image runs the simulated runtime.** `Dockerfile.enclave` builds `tee-relay`
+  without the `snp` feature unless given `--build-arg CARGO_FEATURES=snp`. A simulated-only
+  build starts only with `SELKEY_ALLOW_SIMULATED=1` and issues `SELF_ASSERTED` receipts. An
+  `snp` build uses SEV-SNP through `/dev/sev-guest` and refuses to start if SEV-SNP
+  initialisation fails, unless `SELKEY_ALLOW_SIMULATED=1` is set. See
+  [docs/deployment.md](docs/deployment.md#sev-snp-runtime).
+- **Verify against a pinned relay key.** `tee-verifier` treats a receipt checked only against
+  the key it names itself as not valid (`ValidUnpinned`).
 - **The measurement doesn't cover the relay binary.** There's no measured boot yet. On a
   typical confidential VM running the relay in Docker (e.g. GCP N2D), the SNP launch
   measurement most likely covers the guest firmware only, not the kernel, the container image
   or the relay. So a matching measurement doesn't show which relay code ran. See
   [docs/reproducible-builds.md](docs/reproducible-builds.md).
-- **Clients don't yet verify attestation before sending inputs.** The relay produces attestable
-  receipts, but don't treat it as secure against an active man-in-the-middle until clients
-  verify attestation first.
+- **Clients don't yet verify attestation before sending inputs.** Selkey clients have no TEE
+  lane input path yet. The relay produces attestable receipts, but don't treat it as secure
+  against an active man-in-the-middle until clients verify attestation first.
 - **Builds aren't yet reproducible end to end.** The binary artifact hash is reproducible, but
   the SNP measurement isn't. See [docs/reproducible-builds.md](docs/reproducible-builds.md).
 - **No live transparency log yet.** Publishing enclave measurements is still open:

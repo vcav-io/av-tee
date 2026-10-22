@@ -9,12 +9,13 @@ use receipt_core::{
     TeeType, TokenUsage, UnsignedReceiptV2, sign_and_assemble_receipt_v2,
 };
 use tee_transcript::{
-    TranscriptInputs, TranscriptInputsV2, compute_transcript_hash, compute_transcript_hash_v2,
+    RelayConfig, TranscriptInputs, TranscriptInputsV2, TranscriptInputsV3, compute_transcript_hash,
+    compute_transcript_hash_v2, compute_transcript_hash_v3,
 };
 use tee_verifier::{
     AttestationHashStatus, AttestationStatus, MeasurementEntry, QuoteVerifyError,
-    SevSnpQuoteVerifier, SimulatedQuoteVerifier, StaticAllowlist, TranscriptSchema,
-    verify_tee_receipt,
+    SevSnpQuoteVerifier, SimulatedQuoteVerifier, StaticAllowlist, TranscriptSchema, VerifyOptions,
+    verify_tee_receipt, verify_tee_receipt_with_options,
 };
 
 // ---------------------------------------------------------------------------
@@ -25,14 +26,14 @@ fn simulated_measurement() -> String {
     hex::encode(Sha256::digest(b"av-tee-simulated-v1"))
 }
 
-/// Builds a quote given the transcript hash.
-type QuoteBuilder = Box<dyn FnOnce(&[u8; 64]) -> (Vec<u8>, String)>;
+/// Builds a quote given the transcript hash: (quote bytes, measurement, tee_type).
+type QuoteBuilder = Box<dyn FnOnce(&[u8; 64]) -> (Vec<u8>, String, TeeType)>;
 
 fn simulated_quote_builder() -> QuoteBuilder {
     Box::new(|transcript_hash: &[u8; 64]| {
         let mut qb = Vec::from(&b"simulated-quote:"[..]);
         qb.extend_from_slice(transcript_hash);
-        (qb, simulated_measurement())
+        (qb, simulated_measurement(), TeeType::Simulated)
     })
 }
 
@@ -42,7 +43,7 @@ fn snp_quote_builder(measurement: [u8; 48]) -> QuoteBuilder {
         report[0..4].copy_from_slice(&2u32.to_le_bytes());
         report[80..144].copy_from_slice(transcript_hash);
         report[144..192].copy_from_slice(&measurement);
-        (report, hex::encode(measurement))
+        (report, hex::encode(measurement), TeeType::SevSnp)
     })
 }
 
@@ -77,7 +78,7 @@ fn build_receipt_with_vcek(
     };
     let transcript_hash = compute_transcript_hash_v2(&inputs);
 
-    let (quote_bytes, measurement) = quote_builder(&transcript_hash);
+    let (quote_bytes, measurement, tee_type) = quote_builder(&transcript_hash);
 
     let b64 = base64::engine::general_purpose::STANDARD;
     let quote_b64 = b64.encode(&quote_bytes);
@@ -152,7 +153,7 @@ fn build_receipt_with_vcek(
         },
         provider_attestation: None,
         tee_attestation: Some(TeeAttestation {
-            tee_type: Some(TeeType::Simulated),
+            tee_type: Some(tee_type),
             measurement: Some(measurement),
             quote: Some(quote_b64),
             attestation_hash: Some(attestation_hash),
@@ -192,7 +193,7 @@ fn build_v1_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
     };
     let transcript_hash = compute_transcript_hash(&inputs);
 
-    let (quote_bytes, measurement) = quote_builder(&transcript_hash);
+    let (quote_bytes, measurement, tee_type) = quote_builder(&transcript_hash);
 
     let b64 = base64::engine::general_purpose::STANDARD;
     let quote_b64 = b64.encode(&quote_bytes);
@@ -267,7 +268,7 @@ fn build_v1_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
         },
         provider_attestation: None,
         tee_attestation: Some(TeeAttestation {
-            tee_type: Some(TeeType::Simulated),
+            tee_type: Some(tee_type),
             measurement: Some(measurement),
             quote: Some(quote_b64),
             attestation_hash: Some(attestation_hash),
@@ -282,9 +283,32 @@ fn build_v1_receipt(quote_builder: QuoteBuilder) -> (ReceiptV2, SigningKey) {
     (receipt, signing_key)
 }
 
+/// Verify with the relay key pinned (the key that signed the fixture).
+fn verify_pinned<'a>(
+    receipt: impl Into<tee_verifier::TeeReceipt<'a>>,
+    key: &SigningKey,
+    allowlist: &StaticAllowlist,
+    verifier: &dyn tee_verifier::QuoteVerifier,
+) -> Result<tee_verifier::TeeVerificationResult, tee_verifier::VerifyError> {
+    verify_tee_receipt_with_options(
+        receipt,
+        allowlist,
+        verifier,
+        &VerifyOptions {
+            pinned_receipt_key: Some(key.verifying_key()),
+            snp: Some(tee_verifier::VerificationConfig::new(
+                tee_verifier::TcbPolicy::reject_all_zero(),
+            )),
+            ..VerifyOptions::default()
+        },
+    )
+}
+
 fn allowlist_with(measurement: &str) -> StaticAllowlist {
     StaticAllowlist::from_entries(vec![MeasurementEntry {
         measurement: measurement.to_string(),
+        platform: tee_verifier::MeasurementPlatform::Unspecified,
+        description: None,
         build_id: "test-v0.1.0".to_string(),
         git_rev: "abc1234".to_string(),
         oci_digest: None,
@@ -300,16 +324,18 @@ fn allowlist_with(measurement: &str) -> StaticAllowlist {
 
 #[test]
 fn simulated_receipt_full_verification() {
-    let (receipt, _key) = build_receipt(simulated_quote_builder());
+    let (receipt, key) = build_receipt(simulated_quote_builder());
     let allowlist = allowlist_with(&simulated_measurement());
     let verifier = SimulatedQuoteVerifier;
 
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
-    assert!(result.is_valid(), "is_valid() should return true");
-    assert!(result.is_valid_parsed());
+    // A simulated quote is never platform-verified.
+    assert_eq!(result.attestation_status, AttestationStatus::QuoteSimulated);
+    assert!(!result.is_valid());
+    assert!(!result.is_valid_parsed());
+    assert!(result.is_valid_simulated());
     assert!(result.is_valid_sans_quote());
-    assert_eq!(result.attestation_status, AttestationStatus::QuoteVerified);
     assert_eq!(
         result.transcript_schema,
         Some(TranscriptSchema::V2),
@@ -321,11 +347,11 @@ fn simulated_receipt_full_verification() {
 fn v1_receipt_verifies_with_fallback() {
     // Build a receipt using v1 transcript hash (no model_identity_asserted in hash).
     // Verifier should fall back to v1 and report TranscriptSchema::V1.
-    let (receipt, _key) = build_v1_receipt(simulated_quote_builder());
+    let (receipt, key) = build_v1_receipt(simulated_quote_builder());
     let allowlist = allowlist_with(&simulated_measurement());
     let verifier = SimulatedQuoteVerifier;
 
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
     assert!(
         result.transcript_hash_valid,
@@ -336,7 +362,14 @@ fn v1_receipt_verifies_with_fallback() {
         Some(TranscriptSchema::V1),
         "v1 receipt should report TranscriptSchema::V1"
     );
-    assert!(result.is_valid(), "v1 receipt should still be fully valid");
+    assert_eq!(
+        result.transcript_schema.as_ref().unwrap().label(),
+        "code/config unbound"
+    );
+    assert!(
+        result.is_valid_simulated(),
+        "v1 receipt should still be valid (simulated)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +378,7 @@ fn v1_receipt_verifies_with_fallback() {
 
 #[test]
 fn quote_user_data_mismatch() {
-    let (mut receipt, _key) = build_receipt(simulated_quote_builder());
+    let (mut receipt, key) = build_receipt(simulated_quote_builder());
 
     // Tamper: set user_data_hex to a different value (after signing, breaks binding)
     if let Some(ref mut tee_att) = receipt.tee_attestation {
@@ -354,7 +387,7 @@ fn quote_user_data_mismatch() {
 
     let allowlist = allowlist_with(&simulated_measurement());
     let verifier = SimulatedQuoteVerifier;
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
     assert_eq!(
         result.attestation_status,
@@ -366,7 +399,7 @@ fn quote_user_data_mismatch() {
 
 #[test]
 fn quote_measurement_mismatch() {
-    let (mut receipt, _key) = build_receipt(simulated_quote_builder());
+    let (mut receipt, key) = build_receipt(simulated_quote_builder());
 
     // Tamper: set measurement to a different value
     if let Some(ref mut tee_att) = receipt.tee_attestation {
@@ -375,7 +408,7 @@ fn quote_measurement_mismatch() {
 
     let allowlist = allowlist_with(&simulated_measurement());
     let verifier = SimulatedQuoteVerifier;
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
     assert_eq!(
         result.attestation_status,
@@ -390,7 +423,7 @@ fn quote_measurement_mismatch() {
 
 #[test]
 fn tampered_quote_bytes() {
-    let (mut receipt, _key) = build_receipt(simulated_quote_builder());
+    let (mut receipt, key) = build_receipt(simulated_quote_builder());
 
     // Tamper: modify the quote bytes (breaks attestation_hash check)
     if let Some(ref mut tee_att) = receipt.tee_attestation {
@@ -402,7 +435,7 @@ fn tampered_quote_bytes() {
 
     let allowlist = allowlist_with(&simulated_measurement());
     let verifier = SimulatedQuoteVerifier;
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
     assert_eq!(
         result.attestation_hash_status,
@@ -412,18 +445,87 @@ fn tampered_quote_bytes() {
 
 #[test]
 fn wrong_verifier_for_format() {
-    let (receipt, _key) = build_receipt(simulated_quote_builder());
+    let (mut receipt, key) = build_receipt(simulated_quote_builder());
     let allowlist = allowlist_with(&simulated_measurement());
+    // Claim SEV-SNP for a simulated quote, so the SNP parser sees it.
+    receipt.tee_attestation.as_mut().unwrap().tee_type = Some(TeeType::SevSnp);
 
     // Use SNP verifier on a simulated quote — wrong format
     let verifier = SevSnpQuoteVerifier::parsing_only();
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
     assert!(matches!(
         result.attestation_status,
         AttestationStatus::QuoteInvalid(QuoteVerifyError::WrongLength { .. })
     ));
     assert!(!result.is_valid());
+}
+
+#[test]
+fn simulated_receipt_is_rejected_by_the_snp_verifier() {
+    let (receipt, key) = build_receipt(simulated_quote_builder());
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_pinned(
+        &receipt,
+        &key,
+        &allowlist,
+        &SevSnpQuoteVerifier::parsing_only(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        result.attestation_status,
+        AttestationStatus::QuoteInvalid(QuoteVerifyError::TeeTypeMismatch {
+            receipt: Some(TeeType::Simulated),
+            verifier: TeeType::SevSnp,
+        })
+    );
+    assert!(!result.is_valid_parsed());
+}
+
+#[test]
+fn snp_receipt_is_rejected_by_the_simulated_verifier() {
+    let snp_measurement = [0xBB_u8; 48];
+    let (receipt, key) = build_receipt(snp_quote_builder(snp_measurement));
+    let allowlist = allowlist_with(&hex::encode(snp_measurement));
+
+    let result = verify_pinned(&receipt, &key, &allowlist, &SimulatedQuoteVerifier).unwrap();
+
+    assert!(matches!(
+        result.attestation_status,
+        AttestationStatus::QuoteInvalid(QuoteVerifyError::TeeTypeMismatch { .. })
+    ));
+    assert!(!result.is_valid_simulated());
+}
+
+#[test]
+fn receipt_without_tee_type_is_rejected() {
+    let (mut receipt, key) = build_receipt(simulated_quote_builder());
+    receipt.tee_attestation.as_mut().unwrap().tee_type = None;
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_pinned(&receipt, &key, &allowlist, &SimulatedQuoteVerifier).unwrap();
+
+    assert!(matches!(
+        result.attestation_status,
+        AttestationStatus::QuoteInvalid(QuoteVerifyError::TeeTypeMismatch { receipt: None, .. })
+    ));
+}
+
+#[test]
+fn simulated_quote_in_tee_attested_receipt_is_rejected() {
+    let (mut receipt, key) = build_receipt(simulated_quote_builder());
+    receipt.assurance_level = AssuranceLevel::TeeAttested;
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_pinned(&receipt, &key, &allowlist, &SimulatedQuoteVerifier).unwrap();
+
+    assert_eq!(
+        result.attestation_status,
+        AttestationStatus::QuoteInvalid(QuoteVerifyError::SimulatedClaimsTeeAttested)
+    );
+    assert!(!result.is_valid_simulated());
 }
 
 // ---------------------------------------------------------------------------
@@ -433,11 +535,11 @@ fn wrong_verifier_for_format() {
 #[test]
 fn snp_parse_only_returns_parsed_not_verified() {
     let snp_measurement = [0xBB_u8; 48];
-    let (receipt, _key) = build_receipt(snp_quote_builder(snp_measurement));
+    let (receipt, key) = build_receipt(snp_quote_builder(snp_measurement));
     let allowlist = allowlist_with(&hex::encode(snp_measurement));
     let verifier = SevSnpQuoteVerifier::parsing_only();
 
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
     assert_eq!(result.attestation_status, AttestationStatus::QuoteParsed);
     assert!(!result.is_valid(), "is_valid requires ChainVerified");
@@ -450,13 +552,13 @@ fn snp_parse_only_returns_parsed_not_verified() {
 
 #[test]
 fn valid_quote_unknown_measurement() {
-    let (receipt, _key) = build_receipt(simulated_quote_builder());
+    let (receipt, key) = build_receipt(simulated_quote_builder());
     let allowlist = StaticAllowlist::from_entries(vec![]); // empty
     let verifier = SimulatedQuoteVerifier;
 
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
-    assert_eq!(result.attestation_status, AttestationStatus::QuoteVerified);
+    assert_eq!(result.attestation_status, AttestationStatus::QuoteSimulated);
     assert!(result.measurement_match.is_none());
     assert!(!result.is_valid());
     assert!(!result.is_valid_parsed());
@@ -470,11 +572,11 @@ fn valid_quote_unknown_measurement() {
 #[test]
 fn is_valid_requires_chain_verified() {
     let snp_measurement = [0xCC_u8; 48];
-    let (receipt, _key) = build_receipt(snp_quote_builder(snp_measurement));
+    let (receipt, key) = build_receipt(snp_quote_builder(snp_measurement));
     let allowlist = allowlist_with(&hex::encode(snp_measurement));
     let verifier = SevSnpQuoteVerifier::parsing_only();
 
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
     assert_eq!(result.attestation_status, AttestationStatus::QuoteParsed);
     assert!(!result.is_valid(), "is_valid requires ChainVerified");
@@ -486,27 +588,83 @@ fn is_valid_requires_chain_verified() {
 }
 
 #[test]
-fn is_valid_parsed_accepts_both() {
-    let (receipt, _key) = build_receipt(simulated_quote_builder());
+fn simulated_quote_is_never_platform_verified() {
+    let (receipt, key) = build_receipt(simulated_quote_builder());
     let allowlist = allowlist_with(&simulated_measurement());
     let verifier = SimulatedQuoteVerifier;
 
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
-    assert_eq!(result.attestation_status, AttestationStatus::QuoteVerified);
-    assert!(result.is_valid());
-    assert!(result.is_valid_parsed());
+    assert_eq!(result.attestation_status, AttestationStatus::QuoteSimulated);
+    assert!(!result.is_valid());
+    assert!(!result.is_valid_parsed());
+    assert!(result.is_valid_simulated());
     assert!(result.is_valid_sans_quote());
 }
 
+// ---------------------------------------------------------------------------
+// Pinned receipt key
+// ---------------------------------------------------------------------------
+
 #[test]
-fn is_valid_sans_quote_ignores_attestation() {
+fn unpinned_verification_is_not_valid() {
     let (receipt, _key) = build_receipt(simulated_quote_builder());
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_tee_receipt(&receipt, &allowlist, &SimulatedQuoteVerifier).unwrap();
+
+    assert_eq!(
+        result.signature_status,
+        tee_verifier::SignatureStatus::ValidUnpinned
+    );
+    assert!(!result.is_valid_sans_quote());
+    assert!(!result.is_valid_simulated());
+}
+
+#[test]
+fn receipt_naming_a_different_key_than_the_pin_is_rejected() {
+    // A self-consistent receipt: signed by, attested to and naming key B.
+    let (receipt, _key_b) = build_receipt(simulated_quote_builder());
+    let allowlist = allowlist_with(&simulated_measurement());
+    let pinned = SigningKey::from_bytes(&[0x11; 32]);
+
+    let result = verify_pinned(&receipt, &pinned, &allowlist, &SimulatedQuoteVerifier).unwrap();
+
+    assert_eq!(
+        result.signature_status,
+        tee_verifier::SignatureStatus::KeyMismatch
+    );
+    assert!(!result.is_valid_simulated());
+    assert!(!result.is_valid_sans_quote());
+}
+
+#[test]
+fn removing_the_embedded_key_after_signing_invalidates_the_receipt() {
+    let (mut receipt, key) = build_receipt(simulated_quote_builder());
+    // Removing the embedded key changes the signed content, so the signature
+    // no longer verifies under the pinned key.
+    receipt
+        .tee_attestation
+        .as_mut()
+        .unwrap()
+        .receipt_signing_pubkey_hex = None;
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_pinned(&receipt, &key, &allowlist, &SimulatedQuoteVerifier).unwrap();
+    assert_eq!(
+        result.signature_status,
+        tee_verifier::SignatureStatus::Invalid
+    );
+}
+
+#[test]
+fn is_valid_sans_quote_rejects_an_invalid_quote() {
+    let (receipt, key) = build_receipt(simulated_quote_builder());
     let allowlist = allowlist_with(&simulated_measurement());
 
     // Use wrong verifier to get QuoteInvalid
     let verifier = SevSnpQuoteVerifier::parsing_only();
-    let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+    let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
     assert!(matches!(
         result.attestation_status,
@@ -514,7 +672,7 @@ fn is_valid_sans_quote_ignores_attestation() {
     ));
     assert!(!result.is_valid());
     assert!(!result.is_valid_parsed());
-    assert!(result.is_valid_sans_quote());
+    assert!(!result.is_valid_sans_quote());
 }
 
 // ---------------------------------------------------------------------------
@@ -534,14 +692,14 @@ mod snp_vcek_receipt_tests {
     fn malformed_base64_vcek_cert_is_quote_invalid() {
         // snp_vcek_cert present but not valid base64 → hard failure, not silent fallback
         let snp_measurement = [0xBB_u8; 48];
-        let (receipt, _key) = build_receipt_with_vcek(
+        let (receipt, key) = build_receipt_with_vcek(
             snp_quote_builder(snp_measurement),
             Some("!!!not-valid-base64!!!".to_string()),
         );
         let allowlist = allowlist_with(&hex::encode(snp_measurement));
         let verifier = SevSnpQuoteVerifier::parsing_only();
 
-        let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+        let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
         assert!(
             matches!(
@@ -561,13 +719,13 @@ mod snp_vcek_receipt_tests {
         // snp_vcek_cert decodes as base64 but is not valid DER → hard failure
         let snp_measurement = [0xBB_u8; 48];
         let b64 = base64::engine::general_purpose::STANDARD;
-        let garbage_b64 = base64::Engine::encode(&b64, &[0xFF, 0xFE, 0xFD, 0xFC, 0xFB]);
-        let (receipt, _key) =
+        let garbage_b64 = base64::Engine::encode(&b64, [0xFF, 0xFE, 0xFD, 0xFC, 0xFB]);
+        let (receipt, key) =
             build_receipt_with_vcek(snp_quote_builder(snp_measurement), Some(garbage_b64));
         let allowlist = allowlist_with(&hex::encode(snp_measurement));
         let verifier = SevSnpQuoteVerifier::parsing_only();
 
-        let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+        let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
         assert!(
             matches!(
@@ -592,12 +750,12 @@ mod snp_vcek_receipt_tests {
         let b64 = base64::engine::general_purpose::STANDARD;
         let vcek_b64 = base64::Engine::encode(&b64, cert.der());
 
-        let (receipt, _key) =
+        let (receipt, key) =
             build_receipt_with_vcek(snp_quote_builder(snp_measurement), Some(vcek_b64));
         let allowlist = allowlist_with(&hex::encode(snp_measurement));
         let verifier = SevSnpQuoteVerifier::parsing_only();
 
-        let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+        let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
         assert!(
             matches!(
@@ -613,14 +771,40 @@ mod snp_vcek_receipt_tests {
     }
 
     #[test]
+    fn vcek_without_an_explicit_tcb_policy_is_quote_invalid() {
+        let snp_measurement = [0xBB_u8; 48];
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let cert_params = rcgen::CertificateParams::new(vec!["test-vcek".into()]).unwrap();
+        let cert = cert_params.self_signed(&key_pair).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let vcek_b64 = base64::Engine::encode(&b64, cert.der());
+        let (receipt, key) =
+            build_receipt_with_vcek(snp_quote_builder(snp_measurement), Some(vcek_b64));
+        let allowlist = allowlist_with(&hex::encode(snp_measurement));
+
+        let result = tee_verifier::verify_tee_receipt_pinned(
+            &receipt,
+            &key.verifying_key(),
+            &allowlist,
+            &SevSnpQuoteVerifier::parsing_only(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result.attestation_status,
+            AttestationStatus::QuoteInvalid(QuoteVerifyError::TcbPolicyRequired)
+        );
+    }
+
+    #[test]
     fn absent_vcek_cert_stays_parsed() {
         // snp_vcek_cert: None → stays at QuoteParsed (no chain verification attempted)
         let snp_measurement = [0xBB_u8; 48];
-        let (receipt, _key) = build_receipt_with_vcek(snp_quote_builder(snp_measurement), None);
+        let (receipt, key) = build_receipt_with_vcek(snp_quote_builder(snp_measurement), None);
         let allowlist = allowlist_with(&hex::encode(snp_measurement));
         let verifier = SevSnpQuoteVerifier::parsing_only();
 
-        let result = verify_tee_receipt(&receipt, &allowlist, &verifier).unwrap();
+        let result = verify_pinned(&receipt, &key, &allowlist, &verifier).unwrap();
 
         assert_eq!(
             result.attestation_status,
@@ -652,7 +836,7 @@ mod snp_chain_tests {
         let vcek_der = cert.der().to_vec();
 
         let report = vec![0u8; 1184];
-        let config = VerificationConfig::default();
+        let config = VerificationConfig::new(TcbPolicy::reject_all_zero());
 
         let err = snp_chain::verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
         assert!(
@@ -666,7 +850,7 @@ mod snp_chain_tests {
         // Garbage DER → parse failure (not silent fallback)
         let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
         let report = vec![0u8; 1184];
-        let config = VerificationConfig::default();
+        let config = VerificationConfig::new(TcbPolicy::reject_all_zero());
 
         let err = snp_chain::verify_snp_attestation(&report, &garbage, &config).unwrap_err();
         assert!(
@@ -677,7 +861,7 @@ mod snp_chain_tests {
 
     #[test]
     fn snp_chain_types_are_exported() {
-        let _config = VerificationConfig::default();
+        let _config = VerificationConfig::new(TcbPolicy::reject_all_zero());
         let _policy = TcbPolicy {
             boot_loader_min: 1,
             tee_min: 0,
@@ -709,7 +893,7 @@ mod snp_sig_tests {
     const SIG_S_OFFSET: usize = 744;
     const SIG_COMPONENT_LEN: usize = 72;
     const POLICY_OFFSET: usize = 8;
-    const FLAGS_OFFSET: usize = 72;
+    const KEY_INFO_OFFSET: usize = 72;
     const SIGNED_REGION_END: usize = 672;
 
     fn be_to_le_padded(be_bytes: &[u8], pad_len: usize) -> Vec<u8> {
@@ -732,12 +916,9 @@ mod snp_sig_tests {
         // Signature algo (offset 52, inside signed region)
         report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
 
-        // Flags (offset 72): bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK)
-        let mut flags: u32 = 0;
-        if vlek {
-            flags |= 1;
-        }
-        report[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+        // KEY_INFO (offset 72): SIGNING_KEY in bits 4:2 (0=VCEK, 1=VLEK)
+        let key_info: u32 = if vlek { 1 << 2 } else { 0 };
+        report[KEY_INFO_OFFSET..KEY_INFO_OFFSET + 4].copy_from_slice(&key_info.to_le_bytes());
 
         report[80..144].copy_from_slice(&[0xAA; 64]);
         report[144..192].copy_from_slice(&[0xBB; 48]);
@@ -816,12 +997,52 @@ mod snp_sig_tests {
 // Receipt v3
 // ---------------------------------------------------------------------------
 
-/// Build a signed v3 TEE receipt. `attested_key` is the key named in
+fn test_relay_config() -> RelayConfig {
+    RelayConfig {
+        provider_id: "anthropic".to_string(),
+        provider_base_url: "https://api.anthropic.com".to_string(),
+        model_id_requested: "test-model".to_string(),
+        policy_lockfile_hash: String::new(),
+        model_profile_allowlist_hash: String::new(),
+        relay_git_rev: "0123abc".to_string(),
+        echo_mode: false,
+        simulated: true,
+        env: String::new(),
+    }
+}
+
+/// Options with the v3 test relay key (seed 7) pinned and `relay_config`.
+fn options_with(relay_config: RelayConfig) -> VerifyOptions {
+    VerifyOptions {
+        relay_config: Some(relay_config),
+        pinned_receipt_key: Some(SigningKey::from_bytes(&[7u8; 32]).verifying_key()),
+        ..VerifyOptions::default()
+    }
+}
+
+/// Build a signed v3 TEE receipt with a v3 transcript bound to
+/// [`test_relay_config`]. `attested_key` is the key named in
 /// `tee_attestation` (and bound into the transcript); `signing_key` signs.
 fn build_v3_receipt(
     quote_builder: QuoteBuilder,
     signing_key: &SigningKey,
     attested_key: &ed25519_dalek::VerifyingKey,
+) -> receipt_core::ReceiptV3 {
+    build_v3_receipt_with_transcript(
+        quote_builder,
+        signing_key,
+        attested_key,
+        Some(&test_relay_config()),
+    )
+}
+
+/// Build a signed v3 TEE receipt. With `relay_config` the transcript is v3;
+/// without, it is the legacy v2 transcript.
+fn build_v3_receipt_with_transcript(
+    quote_builder: QuoteBuilder,
+    signing_key: &SigningKey,
+    attested_key: &ed25519_dalek::VerifyingKey,
+    relay_config: Option<&RelayConfig>,
 ) -> receipt_core::ReceiptV3 {
     use receipt_core::{
         BudgetScope, BudgetUsageV3, CANONICALIZATION_V3, ClaimsV3, CommitmentsV3, ContractHashAlg,
@@ -839,16 +1060,28 @@ fn build_v3_receipt(
     let responder_sub_hash = hex::encode(Sha256::digest(b"test-responder-ciphertext"));
     let model_identity_asserted = "anthropic/test-model";
 
-    let transcript_hash = compute_transcript_hash_v2(&TranscriptInputsV2 {
-        contract_hash: &contract_hash,
-        prompt_template_hash: &prompt_template_hash,
-        initiator_submission_hash: &initiator_sub_hash,
-        responder_submission_hash: &responder_sub_hash,
-        output_hash: &output_hash,
-        receipt_signing_pubkey_hex: &pubkey_hex,
-        model_identity_asserted,
-    });
-    let (quote_bytes, measurement) = quote_builder(&transcript_hash);
+    let transcript_hash = match relay_config {
+        Some(relay_config) => compute_transcript_hash_v3(&TranscriptInputsV3 {
+            contract_hash: &contract_hash,
+            prompt_template_hash: &prompt_template_hash,
+            initiator_submission_hash: &initiator_sub_hash,
+            responder_submission_hash: &responder_sub_hash,
+            output_hash: &output_hash,
+            receipt_signing_pubkey_hex: &pubkey_hex,
+            model_identity_asserted,
+            relay_config_hash: &relay_config.hash_hex(),
+        }),
+        None => compute_transcript_hash_v2(&TranscriptInputsV2 {
+            contract_hash: &contract_hash,
+            prompt_template_hash: &prompt_template_hash,
+            initiator_submission_hash: &initiator_sub_hash,
+            responder_submission_hash: &responder_sub_hash,
+            output_hash: &output_hash,
+            receipt_signing_pubkey_hex: &pubkey_hex,
+            model_identity_asserted,
+        }),
+    };
+    let (quote_bytes, measurement, tee_type) = quote_builder(&transcript_hash);
     let b64 = base64::engine::general_purpose::STANDARD;
 
     let commitment = |nonce: u8, ctx: serde_json::Value| {
@@ -923,7 +1156,7 @@ fn build_v3_receipt(
         },
         provider_attestation: None,
         tee_attestation: Some(TeeAttestation {
-            tee_type: Some(TeeType::Simulated),
+            tee_type: Some(tee_type),
             measurement: Some(measurement),
             quote: Some(b64.encode(&quote_bytes)),
             attestation_hash: Some(hex::encode(Sha256::digest(&quote_bytes))),
@@ -947,16 +1180,194 @@ fn v3_receipt_full_verification() {
     );
     let allowlist = allowlist_with(&simulated_measurement());
 
-    let result = verify_tee_receipt(&receipt, &allowlist, &SimulatedQuoteVerifier).unwrap();
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist,
+        &SimulatedQuoteVerifier,
+        &options_with(test_relay_config()),
+    )
+    .unwrap();
 
     assert_eq!(
         result.signature_status,
         tee_verifier::SignatureStatus::Valid
     );
     assert!(result.transcript_hash_valid);
-    assert_eq!(result.transcript_schema, Some(TranscriptSchema::V2));
+    assert_eq!(result.transcript_schema, Some(TranscriptSchema::V3));
+    assert_eq!(result.relay_config, Some(test_relay_config()));
     assert!(result.submission_hashes_present);
-    assert!(result.is_valid());
+    assert!(result.is_valid_simulated());
+}
+
+#[test]
+fn v3_transcript_does_not_verify_without_the_relay_config() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist,
+        &SimulatedQuoteVerifier,
+        &VerifyOptions {
+            pinned_receipt_key: Some(signing_key.verifying_key()),
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(!result.transcript_hash_valid);
+    assert_eq!(result.transcript_schema, None);
+    assert_eq!(result.relay_config, None);
+    assert!(!result.is_valid());
+}
+
+#[test]
+fn v3_transcript_does_not_verify_against_a_different_relay_config() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    for other in [
+        RelayConfig {
+            provider_base_url: "https://api.example.test".to_string(),
+            ..test_relay_config()
+        },
+        RelayConfig {
+            model_id_requested: "other-model".to_string(),
+            ..test_relay_config()
+        },
+        RelayConfig {
+            simulated: false,
+            ..test_relay_config()
+        },
+    ] {
+        let result = verify_tee_receipt_with_options(
+            &receipt,
+            &allowlist,
+            &SimulatedQuoteVerifier,
+            &options_with(other.clone()),
+        )
+        .unwrap();
+        assert!(!result.transcript_hash_valid, "{other:?}");
+        assert_eq!(result.relay_config, None);
+        assert!(!result.is_valid());
+    }
+}
+
+#[test]
+fn v3_receipt_with_legacy_v2_transcript_verifies_labelled_unbound() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt_with_transcript(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+        None,
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    // Without a relay config, a v2 transcript verifies as v2, labelled unbound.
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist,
+        &SimulatedQuoteVerifier,
+        &VerifyOptions {
+            pinned_receipt_key: Some(signing_key.verifying_key()),
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(result.transcript_hash_valid);
+    let schema = result.transcript_schema.expect("schema");
+    assert_eq!(schema, TranscriptSchema::V2);
+    assert!(!schema.binds_relay_config());
+    assert_eq!(schema.label(), "code/config unbound");
+    assert_eq!(result.relay_config, None);
+}
+
+#[test]
+fn legacy_transcript_does_not_verify_when_a_relay_config_is_supplied() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt_with_transcript(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+        None,
+    );
+    let allowlist = allowlist_with(&simulated_measurement());
+
+    let explicit = VerifyOptions {
+        require_transcript_v3: true,
+        pinned_receipt_key: Some(signing_key.verifying_key()),
+        ..VerifyOptions::default()
+    };
+    for options in [options_with(test_relay_config()), explicit] {
+        let result = verify_tee_receipt_with_options(
+            &receipt,
+            &allowlist,
+            &SimulatedQuoteVerifier,
+            &options,
+        )
+        .unwrap();
+        // The v2 match is reported, but it is not a valid transcript here.
+        assert_eq!(result.transcript_schema, Some(TranscriptSchema::V2));
+        assert!(!result.transcript_hash_valid);
+        assert!(!result.is_valid_sans_quote());
+        assert_eq!(result.relay_config, None);
+    }
+}
+
+#[test]
+fn relay_config_claim_depends_on_what_the_measurement_covers() {
+    let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+    let receipt = build_v3_receipt(
+        simulated_quote_builder(),
+        &signing_key,
+        &signing_key.verifying_key(),
+    );
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist_with(&simulated_measurement()),
+        &SimulatedQuoteVerifier,
+        &options_with(test_relay_config()),
+    )
+    .unwrap();
+    assert!(result.transcript_hash_valid);
+    assert_eq!(
+        result.relay_config_claim(),
+        Some("relay config asserted (not code-attested)")
+    );
+
+    // No claim for a receipt that fails receipt-level checks (here: the
+    // relay key is not pinned).
+    let unpinned = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist_with(&simulated_measurement()),
+        &SimulatedQuoteVerifier,
+        &VerifyOptions {
+            relay_config: Some(test_relay_config()),
+            ..VerifyOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(unpinned.transcript_hash_valid);
+    assert_eq!(unpinned.relay_config_claim(), None);
+}
+
+#[test]
+fn v3_label_does_not_claim_code_attestation() {
+    assert_eq!(
+        TranscriptSchema::V3.label(),
+        "relay config asserted (not code-attested)"
+    );
 }
 
 #[test]
@@ -966,11 +1377,25 @@ fn v3_receipt_signed_by_a_key_other_than_the_attested_key_is_invalid() {
     let receipt = build_v3_receipt(simulated_quote_builder(), &signing_key, &attested_key);
     let allowlist = allowlist_with(&simulated_measurement());
 
+    // Unpinned: the signature does not verify under the key the receipt names.
     let result = verify_tee_receipt(&receipt, &allowlist, &SimulatedQuoteVerifier).unwrap();
-
     assert_eq!(
         result.signature_status,
         tee_verifier::SignatureStatus::Invalid
     );
-    assert!(!result.is_valid());
+    assert!(!result.is_valid_simulated());
+
+    // Pinned to the signing key: the receipt names a different key.
+    let result = verify_tee_receipt_with_options(
+        &receipt,
+        &allowlist,
+        &SimulatedQuoteVerifier,
+        &options_with(test_relay_config()),
+    )
+    .unwrap();
+    assert_eq!(
+        result.signature_status,
+        tee_verifier::SignatureStatus::KeyMismatch
+    );
+    assert!(!result.is_valid_simulated());
 }

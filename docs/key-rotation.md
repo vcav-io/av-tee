@@ -5,8 +5,8 @@
 The TEE relay's Ed25519 signing key is sealed to the CVM. Rotation happens
 by restarting the enclave with the sealed key file removed:
 
-1. Move `$SELKEY_TEE_DATA_DIR/sealed_signing_key` aside (`/var/lib/selkey-tee` in
-   `docker-compose.tee.yml`)
+1. Move `$SELKEY_TEE_DATA_DIR/sealed_signing_key.sev-snp` aside (`sealed_signing_key` for the
+   simulated runtime; the data directory is `/var/lib/selkey-tee` in `docker-compose.tee.yml`)
 2. Restart the relay process
 3. A new key is generated, sealed, and used for all subsequent receipts
 
@@ -17,6 +17,11 @@ Verifiers check that the key was attested under a known-good measurement.
 relay binary, so a key attested under a known-good measurement doesn't identify
 the relay code that holds it. Until then, verifiers should pin the relay key
 they trust rather than accept any key attested under a measurement.
+
+Rotation also happens automatically when the sealed key exists but the CVM rejects it (for
+example after an upgrade changed the sealing key policy): the old file is moved aside and a new
+key is generated, unless `SELKEY_SEAL_STRICT=1`. See "Sealed signing key" in
+[deployment.md](deployment.md#sealed-signing-key).
 
 ## What rotation provides
 
@@ -54,9 +59,10 @@ curl -s http://localhost:3100/tee/info | jq .receipt_signing_pubkey_hex
 docker compose -f docker-compose.tee.yml stop tee-relay
 
 # 2. Move the sealed key aside in the data volume. `exec` needs a running
-#    container, so use a one-off container on the same volume.
+#    container, so use a one-off container on the same volume. On the simulated
+#    runtime the file is `sealed_signing_key` (no suffix).
 docker compose -f docker-compose.tee.yml run --rm --no-deps --entrypoint mv tee-relay \
-  /var/lib/selkey-tee/sealed_signing_key /var/lib/selkey-tee/sealed_signing_key.retired
+  /var/lib/selkey-tee/sealed_signing_key.sev-snp /var/lib/selkey-tee/sealed_signing_key.sev-snp.retired
 
 # 3. Restart — new key is generated and sealed
 docker compose -f docker-compose.tee.yml start tee-relay
@@ -65,7 +71,7 @@ docker compose -f docker-compose.tee.yml start tee-relay
 curl -s http://localhost:3100/tee/info | jq .receipt_signing_pubkey_hex
 ```
 
-Once the new key is confirmed, delete `sealed_signing_key.retired`: verifying old
+Once the new key is confirmed, delete the `.retired` file: verifying old
 receipts needs only the recorded public key, and the retired blob can still be unsealed
 by the same measurement (with the simulated runtime it is effectively the plaintext key).
 Delete it promptly after a suspected compromise.
