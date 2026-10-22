@@ -174,6 +174,13 @@ pub fn accept_contract(contract_json: &serde_json::Value) -> Result<AcceptedCont
             "contract must have exactly 2 participants".to_string(),
         ));
     }
+    if contract.participants.iter().any(|p| p.is_empty())
+        || contract.participants[0] == contract.participants[1]
+    {
+        return Err(RelayError::ContractValidation(
+            "contract participants must be distinct and non-empty".to_string(),
+        ));
+    }
     Ok(AcceptedContract {
         contract,
         contract_hash,

@@ -338,6 +338,25 @@ async fn contract_with_unknown_member_is_rejected() {
 }
 
 #[tokio::test]
+async fn contract_with_duplicate_or_empty_participants_is_rejected() {
+    let base = start_relay_server(&start_mock_provider("{}").await).await;
+    let client = reqwest::Client::new();
+
+    for participants in [
+        serde_json::json!(["alice", "alice"]),
+        serde_json::json!(["alice", ""]),
+    ] {
+        let mut contract = contract_json();
+        contract["participants"] = participants.clone();
+        let (status, _) = create_session_raw(&client, &base, contract).await;
+        assert!(
+            (400..500).contains(&status),
+            "participants {participants} must be rejected, got {status}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn contract_carrying_a_legacy_contract_hash_is_rejected() {
     let base = start_relay_server(&start_mock_provider("{}").await).await;
     let client = reqwest::Client::new();
