@@ -290,12 +290,17 @@ fn verify_pinned<'a>(
     allowlist: &StaticAllowlist,
     verifier: &dyn tee_verifier::QuoteVerifier,
 ) -> Result<tee_verifier::TeeVerificationResult, tee_verifier::VerifyError> {
-    tee_verifier::verify_tee_receipt_pinned(
+    verify_tee_receipt_with_options(
         receipt,
-        &key.verifying_key(),
         allowlist,
         verifier,
-        None,
+        &VerifyOptions {
+            pinned_receipt_key: Some(key.verifying_key()),
+            snp: Some(tee_verifier::VerificationConfig::new(
+                tee_verifier::TcbPolicy::reject_all_zero(),
+            )),
+            ..VerifyOptions::default()
+        },
     )
 }
 
@@ -766,6 +771,32 @@ mod snp_vcek_receipt_tests {
     }
 
     #[test]
+    fn vcek_without_an_explicit_tcb_policy_is_quote_invalid() {
+        let snp_measurement = [0xBB_u8; 48];
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let cert_params = rcgen::CertificateParams::new(vec!["test-vcek".into()]).unwrap();
+        let cert = cert_params.self_signed(&key_pair).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let vcek_b64 = base64::Engine::encode(&b64, cert.der());
+        let (receipt, key) =
+            build_receipt_with_vcek(snp_quote_builder(snp_measurement), Some(vcek_b64));
+        let allowlist = allowlist_with(&hex::encode(snp_measurement));
+
+        let result = tee_verifier::verify_tee_receipt_pinned(
+            &receipt,
+            &key.verifying_key(),
+            &allowlist,
+            &SevSnpQuoteVerifier::parsing_only(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result.attestation_status,
+            AttestationStatus::QuoteInvalid(QuoteVerifyError::TcbPolicyRequired)
+        );
+    }
+
+    #[test]
     fn absent_vcek_cert_stays_parsed() {
         // snp_vcek_cert: None → stays at QuoteParsed (no chain verification attempted)
         let snp_measurement = [0xBB_u8; 48];
@@ -805,7 +836,7 @@ mod snp_chain_tests {
         let vcek_der = cert.der().to_vec();
 
         let report = vec![0u8; 1184];
-        let config = VerificationConfig::default();
+        let config = VerificationConfig::new(TcbPolicy::reject_all_zero());
 
         let err = snp_chain::verify_snp_attestation(&report, &vcek_der, &config).unwrap_err();
         assert!(
@@ -819,7 +850,7 @@ mod snp_chain_tests {
         // Garbage DER → parse failure (not silent fallback)
         let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
         let report = vec![0u8; 1184];
-        let config = VerificationConfig::default();
+        let config = VerificationConfig::new(TcbPolicy::reject_all_zero());
 
         let err = snp_chain::verify_snp_attestation(&report, &garbage, &config).unwrap_err();
         assert!(
@@ -830,7 +861,7 @@ mod snp_chain_tests {
 
     #[test]
     fn snp_chain_types_are_exported() {
-        let _config = VerificationConfig::default();
+        let _config = VerificationConfig::new(TcbPolicy::reject_all_zero());
         let _policy = TcbPolicy {
             boot_loader_min: 1,
             tee_min: 0,
@@ -862,7 +893,7 @@ mod snp_sig_tests {
     const SIG_S_OFFSET: usize = 744;
     const SIG_COMPONENT_LEN: usize = 72;
     const POLICY_OFFSET: usize = 8;
-    const FLAGS_OFFSET: usize = 72;
+    const KEY_INFO_OFFSET: usize = 72;
     const SIGNED_REGION_END: usize = 672;
 
     fn be_to_le_padded(be_bytes: &[u8], pad_len: usize) -> Vec<u8> {
@@ -885,12 +916,9 @@ mod snp_sig_tests {
         // Signature algo (offset 52, inside signed region)
         report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
 
-        // Flags (offset 72): bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK)
-        let mut flags: u32 = 0;
-        if vlek {
-            flags |= 1;
-        }
-        report[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+        // KEY_INFO (offset 72): SIGNING_KEY in bits 4:2 (0=VCEK, 1=VLEK)
+        let key_info: u32 = if vlek { 1 << 2 } else { 0 };
+        report[KEY_INFO_OFFSET..KEY_INFO_OFFSET + 4].copy_from_slice(&key_info.to_le_bytes());
 
         report[80..144].copy_from_slice(&[0xAA; 64]);
         report[144..192].copy_from_slice(&[0xBB; 48]);

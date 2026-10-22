@@ -66,7 +66,7 @@ async fn vcek_cert_extracted_from_report() {
 
 #[tokio::test]
 async fn vcek_chain_verification_passes() {
-    use tee_verifier::{VerificationConfig, snp_chain};
+    use tee_verifier::{TcbPolicy, VerificationConfig, snp_chain};
 
     let cvm = SevSnpCvm::new().unwrap();
     let user_data = [0xDDu8; 64];
@@ -78,6 +78,10 @@ async fn vcek_chain_verification_passes() {
         .expect("VCEK cert required for chain verification");
 
     // Full chain: VCEK → ASK → ARK + report signature + TCB
-    snp_chain::verify_snp_attestation(&report.quote, vcek_der, &VerificationConfig::default())
-        .expect("VCEK chain verification should pass on real AMD hardware");
+    snp_chain::verify_snp_attestation(
+        &report.quote,
+        vcek_der,
+        &VerificationConfig::new(TcbPolicy::reject_all_zero()),
+    )
+    .expect("VCEK chain verification should pass on real AMD hardware");
 }

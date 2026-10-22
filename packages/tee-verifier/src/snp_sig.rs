@@ -10,7 +10,8 @@ use crate::quote::QuoteVerifyError;
 ///   4..8     guest_svn (u32)
 ///   8..16    policy (u64)        — bit 19 = DEBUG
 ///  52..56    signature_algo (u32) — 1 = ECDSA P-384/SHA-384
-///  72..76    flags (u32)         — bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK)
+///  72..76    KEY_INFO (u32)      — bit 0 AUTHOR_KEY_EN, bit 1 MASK_CHIP_KEY,
+///                                  bits 4:2 SIGNING_KEY (0=VCEK, 1=VLEK, 7=none)
 /// 672..1184  signature structure: r[72] || s[72] || reserved[368]
 const SIGNED_REGION_END: usize = 672;
 const SIG_ALGO_OFFSET: usize = 52;
@@ -18,7 +19,7 @@ const SIG_R_OFFSET: usize = 672;
 const SIG_S_OFFSET: usize = 744;
 const SIG_COMPONENT_LEN: usize = 72;
 const POLICY_OFFSET: usize = 8;
-const FLAGS_OFFSET: usize = 72;
+const KEY_INFO_OFFSET: usize = 72;
 
 /// Expected ECDSA P-384 with SHA-384 algorithm identifier.
 const ECDSA_P384_SHA384: u32 = 1;
@@ -82,20 +83,26 @@ pub fn verify_report_signature(
         .map_err(|e| QuoteVerifyError::ChainInvalid(format!("report signature invalid: {e}")))
 }
 
-/// Check report policy and flags for security-critical bits.
+/// Check report policy and key info for security-critical bits.
 ///
 /// POLICY (offset 8, u64): bit 19 = DEBUG (must be 0 for production).
-/// FLAGS (offset 72, u32): bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK; must be 0).
+/// KEY_INFO (offset 72, u32): SIGNING_KEY (bits 4:2) must be 0 (VCEK), and
+/// MASK_CHIP_KEY (bit 1) must be 0 (otherwise the report is not signed).
 fn check_report_policy(report_bytes: &[u8]) -> Result<(), QuoteVerifyError> {
-    // FLAGS.SIGNING_KEY (bit 0): must be 0 (VCEK). 1 means VLEK.
-    let flags = u32::from_le_bytes(
-        report_bytes[FLAGS_OFFSET..FLAGS_OFFSET + 4]
+    let key_info = u32::from_le_bytes(
+        report_bytes[KEY_INFO_OFFSET..KEY_INFO_OFFSET + 4]
             .try_into()
             .unwrap(),
     );
-    if flags & 1 != 0 {
+    let signing_key = (key_info >> 2) & 0b111;
+    if signing_key != 0 {
+        return Err(QuoteVerifyError::ChainInvalid(format!(
+            "report SIGNING_KEY is {signing_key} (1 = VLEK, 7 = none); only VCEK (0) is accepted"
+        )));
+    }
+    if key_info & 0b10 != 0 {
         return Err(QuoteVerifyError::ChainInvalid(
-            "report signed with VLEK (FLAGS.SIGNING_KEY=1), only VCEK is accepted".into(),
+            "report has MASK_CHIP_KEY set (not signed with the chip key)".into(),
         ));
     }
 
@@ -132,6 +139,14 @@ mod tests {
 
     /// Build a synthetic 1184-byte SNP report and sign it with the given key.
     fn build_signed_report(signing_key: &SigningKey, debug: bool, vlek: bool) -> Vec<u8> {
+        build_signed_report_with_key_info(signing_key, debug, if vlek { 1 << 2 } else { 0 })
+    }
+
+    fn build_signed_report_with_key_info(
+        signing_key: &SigningKey,
+        debug: bool,
+        key_info: u32,
+    ) -> Vec<u8> {
         use ecdsa::signature::Signer;
 
         let mut report = vec![0u8; 1184];
@@ -145,12 +160,8 @@ mod tests {
         }
         report[POLICY_OFFSET..POLICY_OFFSET + 8].copy_from_slice(&policy.to_le_bytes());
 
-        // Flags (offset 72): bit 0 = SIGNING_KEY (0=VCEK, 1=VLEK)
-        let mut flags: u32 = 0;
-        if vlek {
-            flags |= 1;
-        }
-        report[FLAGS_OFFSET..FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
+        // KEY_INFO (offset 72): SIGNING_KEY in bits 4:2
+        report[KEY_INFO_OFFSET..KEY_INFO_OFFSET + 4].copy_from_slice(&key_info.to_le_bytes());
 
         // Signature algo = 1 (ECDSA P-384) — at offset 52, inside signed region
         report[SIG_ALGO_OFFSET..SIG_ALGO_OFFSET + 4]
@@ -265,5 +276,35 @@ mod tests {
             err,
             QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("VLEK")
         ));
+    }
+
+    #[test]
+    fn signing_key_none_rejected() {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = VerifyingKey::from(&signing_key);
+        let report = build_signed_report_with_key_info(&signing_key, false, 7 << 2);
+        assert!(verify_report_signature(&report, &verifying_key).is_err());
+    }
+
+    #[test]
+    fn mask_chip_key_rejected() {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = VerifyingKey::from(&signing_key);
+        let report = build_signed_report_with_key_info(&signing_key, false, 0b10);
+        let err = verify_report_signature(&report, &verifying_key).unwrap_err();
+        assert!(matches!(
+            err,
+            QuoteVerifyError::ChainInvalid(ref msg) if msg.contains("MASK_CHIP_KEY")
+        ));
+    }
+
+    #[test]
+    fn author_key_enabled_is_accepted() {
+        // AUTHOR_KEY_EN (bit 0) is set when the guest was launched with an ID
+        // block author key; it does not change the signing key.
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = VerifyingKey::from(&signing_key);
+        let report = build_signed_report_with_key_info(&signing_key, false, 1);
+        verify_report_signature(&report, &verifying_key).unwrap();
     }
 }

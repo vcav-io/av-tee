@@ -104,8 +104,10 @@ impl<'a> TeeReceipt<'a> {
 /// Verification inputs beyond the receipt itself.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyOptions {
-    /// SEV-SNP platform checks.
-    pub snp: VerificationConfig,
+    /// SEV-SNP platform checks, including the minimum TCB. Required to verify
+    /// an SEV-SNP certificate chain: without it, a receipt that carries a
+    /// VCEK is reported as `QuoteInvalid(TcbPolicyRequired)`.
+    pub snp: Option<VerificationConfig>,
     /// Relay configuration to check a v3 transcript against.
     ///
     /// Transcript v3 binds `relay_config_hash`, which the receipt does not
@@ -153,19 +155,19 @@ pub fn verify_tee_receipt_pinned<'a>(
     )
 }
 
-/// Verify without a pinned key. The signature status is at best
-/// [`SignatureStatus::ValidUnpinned`], so the result is never `is_valid*`.
-/// Prefer [`verify_tee_receipt_pinned`].
+/// Verify without a pinned key or SEV-SNP settings. The signature status is
+/// at best [`SignatureStatus::ValidUnpinned`], so the result is never
+/// `is_valid*`. Prefer [`verify_tee_receipt_with_options`].
 pub fn verify_tee_receipt<'a>(
     receipt: impl Into<TeeReceipt<'a>>,
     allowlist: &dyn TransparencySource,
     quote_verifier: &dyn QuoteVerifier,
 ) -> Result<TeeVerificationResult, VerifyError> {
-    verify_tee_receipt_with_config(
+    verify_tee_receipt_with_options(
         receipt,
         allowlist,
         quote_verifier,
-        &VerificationConfig::default(),
+        &VerifyOptions::default(),
     )
 }
 
@@ -180,7 +182,7 @@ pub fn verify_tee_receipt_with_config<'a>(
         allowlist,
         quote_verifier,
         &VerifyOptions {
-            snp: config.clone(),
+            snp: Some(config.clone()),
             ..VerifyOptions::default()
         },
     )
@@ -192,7 +194,6 @@ pub fn verify_tee_receipt_with_options<'a>(
     quote_verifier: &dyn QuoteVerifier,
     options: &VerifyOptions,
 ) -> Result<TeeVerificationResult, VerifyError> {
-    let config = &options.snp;
     let receipt = receipt.into();
     let fields = receipt.fields();
     let tee_att = fields
@@ -299,9 +300,17 @@ pub fn verify_tee_receipt_with_options<'a>(
                         .as_ref()
                         .and_then(|q| b64.decode(q).ok())
                         .unwrap_or_default();
-                    match snp_chain::verify_snp_attestation(&quote_bytes, &vcek_der, config) {
-                        Ok(()) => AttestationStatus::QuoteVerified,
-                        Err(e) => AttestationStatus::QuoteInvalid(e),
+                    match &options.snp {
+                        None => {
+                            AttestationStatus::QuoteInvalid(QuoteVerifyError::TcbPolicyRequired)
+                        }
+                        Some(config) => {
+                            match snp_chain::verify_snp_attestation(&quote_bytes, &vcek_der, config)
+                            {
+                                Ok(()) => AttestationStatus::QuoteVerified,
+                                Err(e) => AttestationStatus::QuoteInvalid(e),
+                            }
+                        }
                     }
                 }
             }
